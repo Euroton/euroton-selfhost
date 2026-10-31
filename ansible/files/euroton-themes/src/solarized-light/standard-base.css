@@ -1,0 +1,73 @@
+/*
+ * Theme: Solarized Light
+ */
+:root,
+.ui-standard {
+    --primary: #268bd2;
+
+    --signal-danger: #dc322f;
+
+    --signal-warning: #b58900;
+
+    --signal-success: #859900;
+
+    --signal-info: #2aa198;
+
+    --interaction-norm: #268bd2;
+
+    --interaction-weak: #eee8d5;
+
+    --text-norm: #002b36;
+    --text-weak: #586e75;
+    --text-hint: #93a1a1;
+    --text-disabled: #c9c2a8;
+    --text-invert: white;
+
+    --field-norm: #93a1a1;
+    --field-hover: #657b83;
+    --field-disabled: #ddd6c1;
+
+    --focus-outline: #268bd2;
+    --focus-ring: rgb(38 139 210 / 0.2);
+
+    --border-norm: #ddd6c1;
+    --border-weak: #eee8d5;
+
+    --background-norm: #fdf6e3;
+    --background-weak: #f4eed9;
+    --background-strong: #eee8d5;
+    --background-invert: #002b36;
+
+    --interaction-default: transparent;
+    --interaction-default-hover: rgb(147 161 161 / 0.2);
+    --interaction-default-active: rgb(147 161 161 / 0.35);
+
+    --shadow-norm-opacity: 0.1;
+    --shadow-raised-opacity: 0.1;
+    --shadow-lifted-opacity: 0.16;
+
+    --backdrop-norm: rgb(0 43 54 / 0.48);
+
+    /* Optional colors */
+
+    --optional-scrollbar-thumb-color: #ddd6c1;
+
+    --optional-background-lowered: #f4eed9;
+
+    --optional-email-item-read-background-color: #f4eed9;
+    --optional-email-item-read-text-color: #586e75;
+
+    --optional-logo-text-proton-color: #002b36;
+
+    --optional-promotion-text-color: #0a4453;
+    --optional-promotion-text-weak: #268bd2;
+    --optional-promotion-interaction-hover: rgb(38 139 210 / 0.08);
+    --optional-promotion-background-start: rgb(38 139 210 / 0.15);
+    --optional-promotion-background-end: rgb(42 161 152 / 0.04);
+    --optional-promotion-secondary-color: #2aa198;
+
+    --optional-bg-promotion-bw-button: var(--background-invert);
+    --optional-text-promotion-bw-button: var(--text-invert);
+
+    --optional-shadow-primary-color: 38 139 210;
+}

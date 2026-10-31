@@ -1,0 +1,120 @@
+{# Caddy for Euroton selfhost (ADR 245).
+   Listens on :443 with our self-signed leaf cert, terminates TLS.
+
+   Per-site `kind` (group_vars/all.yml -> caddy_sites):
+     spa   - static file_server over the app's built `root`, with SPA
+             rewrites (`spa_rewrites`, mirroring the app's src/.htaccess)
+             plus a same-origin /api + /internal-api reverse-proxy to
+             euroton-server. That proxy replicates the old webpack
+             dev-server proxy: strip the prefix, drop CSP /
+             X-Frame-Options, and strip a Domain attribute off upstream
+             Set-Cookie so ADR 033's `AUTH-{uid}` cookie lands on the
+             app origin. Without it, login breaks.
+     proxy - plain reverse_proxy to backend_port (euroton-server APIs).
+             https backend, tls_insecure_skip_verify because the leaf is
+             our own.
+     godmode - Vite preview UI on backend_port, /admin/* to euroton-server,
+             whole site limited to operator_allowed. The only route to the
+             admin API: every other site answers 404 for it, and the server
+             binds loopback.
+
+   auto_https off — our cert isn't ACME-issued. admin off — unused. #}
+{
+    auto_https off
+    admin off
+}
+
+{% macro api_proxy() %}
+        request_body {
+            max_size {{ caddy_max_body | default('64MB') }}
+        }
+        reverse_proxy https://127.0.0.1:4000 {
+            transport http {
+                tls_insecure_skip_verify
+            }
+            header_down -Content-Security-Policy
+            header_down -Content-Security-Policy-Report-Only
+            header_down -X-Frame-Options
+            {# Strip a "; Domain=..." attribute off upstream Set-Cookie so
+               the cookie binds to the app origin #}
+            header_down Set-Cookie "; *[Dd]omain=[^;]*" ""
+        }
+{% endmacro %}
+{% for site in caddy_sites %}
+https://{{ site.hostname }}:443 {
+    tls /etc/euroton/ssl/euroton.crt /etc/euroton/ssl/euroton.key
+    header Strict-Transport-Security "max-age=31536000"
+    {# route keeps this order. Caddy would otherwise sort the handle blocks
+       itself, and the deny rules have to run first. #}
+    route {
+{% if site.kind | default('proxy') == 'spa' %}
+        encode gzip
+
+        @admin path /api/admin /api/admin/* /internal-api/admin /internal-api/admin/*
+        handle @admin {
+            respond 404
+        }
+
+        # Same-origin API proxy to euroton-server (replicates the dev-server proxy).
+        # handle_path strips the matched prefix before forwarding, so
+        # /api/core/v4/auth -> /core/v4/auth on euroton-server.
+        handle_path /api/* {
+{{ api_proxy() }}
+        }
+        handle_path /internal-api/* {
+{{ api_proxy() }}
+        }
+
+        # Content-addressed assets (hashed filenames) are served directly; a
+        # miss returns a real 404 instead of falling through to index.html.
+        # Mirrors the app src/.htaccess `RewriteRule ^assets/ - [L]` (ADR 245
+        # addendum) so a renamed/missing chunk fails loudly rather than being
+        # served index.html as text/html — which the JS/worker loader would then
+        # execute as a script and crash the feature that needed it.
+        handle /assets/* {
+            root * {{ site.root }}
+            file_server
+        }
+
+        # SPA navigation routes fall back to index.html.
+        handle {
+            root * {{ site.root }}
+{% for rw in site.spa_rewrites | default([]) %}
+            @rw{{ loop.index }} path {{ rw.match_path }}
+            rewrite @rw{{ loop.index }} {{ rw.to }}
+{% endfor %}
+            try_files {path} {{ site.spa_fallback | default('/index.html') }}
+            file_server
+        }
+{% elif site.kind == 'godmode' %}
+        @outside not remote_ip {{ operator_allowed }}
+        handle @outside {
+            respond 403
+        }
+        handle /admin/* {
+            reverse_proxy https://127.0.0.1:4000 {
+                transport http {
+                    tls_insecure_skip_verify
+                }
+            }
+        }
+        handle {
+            reverse_proxy http://127.0.0.1:{{ site.backend_port }}
+        }
+{% else %}
+        @admin path /admin /admin/*
+        handle @admin {
+            respond 404
+        }
+        handle {
+            reverse_proxy https://127.0.0.1:{{ site.backend_port }} {
+                transport http {
+                    tls_insecure_skip_verify
+                }
+            }
+        }
+{% endif %}
+    }
+}
+
+{% endfor %}

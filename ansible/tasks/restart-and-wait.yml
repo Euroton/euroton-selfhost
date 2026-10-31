@@ -1,0 +1,50 @@
+# ADR 178 + 181 + 182: per-service restart-then-wait. Used by the
+# playbook's serial dev-server warm-up loop so each service's first
+# webpack compile completes before the next is asked to start.
+#
+# Two changes from the original ADR 178 shape:
+#
+#   ADR 181 (companion): the systemd unit may be Type=notify with the
+#     notify-when-ready wrapper, in which case `systemctl restart`
+#     already blocks until READY=1 arrives. The restart task below
+#     therefore now waits implicitly for HTTP-ready (not just port-
+#     bind) when warmup_strategy=notify.
+#
+#   ADR 182: replace `wait_for: port` with `uri: status_code: 200`.
+#     The port check is satisfied the instant webpack-dev-server's
+#     listen() returns — *before* the first compile finishes. The
+#     HTTP check requires a real response, which webpack only serves
+#     once the bundle resolves. Defence-in-depth alongside Type=notify
+#     so a misconfigured unit (warmup_strategy=simple by accident)
+#     still gates correctly.
+#
+# Expects loop variables:
+#   item.0 — entry from the `services` list (name, port, warmup_*).
+#   item.1 — the matching `unit_files.results` entry (carries
+#            the per-unit `changed` flag).
+
+- name: "{{ item.0.name }}: restart (state={{ 'restarted' if (services_any_changed or item.1.changed) else 'started' }})"
+  ansible.builtin.systemd:
+    name: "{{ item.0.name }}"
+    enabled: yes
+    state: >-
+      {{ 'restarted'
+         if (services_any_changed or item.1.changed)
+         else 'started' }}
+
+- name: "{{ item.0.name }}: wait for HTTP 200 on :{{ item.0.port | default('—') }} (ADR 182/183)"
+  ansible.builtin.uri:
+    # ADR 183: use the service's own `warmup_url` when defined (some
+    # backends are plain HTTP — godmode-dev's vite preview, for
+    # instance). Default to https on the bound port for webpack-dev-
+    # server units which terminate TLS with the per-instance leaf.
+    url: "{{ item.0.warmup_url | default('https://127.0.0.1:' ~ item.0.port ~ '/index.html') }}"
+    method: GET
+    status_code: [200, 301, 302]
+    validate_certs: false
+    timeout: 8
+  register: ready
+  retries: 60
+  delay: 10
+  until: ready.status in [200, 301, 302]
+  when: item.0.port | default(none) is not none

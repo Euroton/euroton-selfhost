@@ -1,0 +1,111 @@
+---
+# Takes a bare Debian 13 host to the state playbook.yml expects: toolchain
+# installed, sources cloned at pinned tags, Postgres running.
+#
+#   ansible-playbook -i inventory.yml provision.yml
+#   ansible-playbook -i inventory.yml playbook.yml
+
+- name: Provision a Euroton host
+  hosts: all
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: "os: require Debian"
+      ansible.builtin.assert:
+        that: ansible_facts['distribution'] == 'Debian'
+        fail_msg: "Tested on Debian 13 only; this host runs {{ ansible_facts['distribution'] }}."
+
+    - name: "os: install packages"
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - docker-compose
+          - docker.io
+          - git
+          - gnupg
+          - openssl
+          - python3-yaml
+          - xz-utils
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: "docker: enable + start"
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: "node: check installed version"
+      ansible.builtin.command:
+        cmd: node --version
+      register: node_installed
+      changed_when: false
+      failed_when: false
+
+    - name: "node: fetch published checksums"
+      ansible.builtin.uri:
+        url: "https://nodejs.org/dist/{{ node_version }}/SHASUMS256.txt"
+        return_content: true
+      register: node_shasums
+      when: node_installed.stdout | default('') != node_version
+
+    - name: "node: download tarball"
+      ansible.builtin.get_url:
+        url: "https://nodejs.org/dist/{{ node_version }}/node-{{ node_version }}-linux-x64.tar.xz"
+        dest: "/tmp/node-{{ node_version }}.tar.xz"
+        checksum: "sha256:{{ node_shasums.content | regex_search('([0-9a-f]{64})  node-' ~ node_version ~ '-linux-x64.tar.xz', '\\1') | first }}"
+        mode: "0644"
+      when: node_installed.stdout | default('') != node_version
+
+    - name: "node: unpack into /usr/local"
+      ansible.builtin.unarchive:
+        src: "/tmp/node-{{ node_version }}.tar.xz"
+        dest: /usr/local
+        remote_src: true
+        extra_opts: ["--strip-components=1"]
+      when: node_installed.stdout | default('') != node_version
+
+    - name: "node: enable corepack shims for pnpm + yarn"
+      ansible.builtin.command:
+        cmd: corepack enable
+        creates: /usr/local/bin/pnpm
+
+    - name: "sources: create root"
+      ansible.builtin.file:
+        path: "{{ euroton_root }}"
+        state: directory
+        mode: "0755"
+
+    # update: false because the deploy edits tracked files in place (URLs, SRP
+    # key, palette). Re-clone to change version.
+    - name: "sources: clone at pinned tags"
+      ansible.builtin.git:
+        repo: "{{ item.repo }}"
+        dest: "{{ item.dest }}"
+        version: "{{ item.version }}"
+        depth: 1
+        update: false
+      loop:
+        - { repo: "{{ repo_webclients }}", dest: "{{ mirror_dir }}", version: "{{ version_webclients }}" }
+        - { repo: "{{ repo_server }}", dest: "{{ server_dir }}", version: "{{ version_server }}" }
+        - { repo: "{{ repo_godmode }}", dest: "{{ godmode_dir }}", version: "{{ version_godmode }}" }
+      loop_control:
+        label: "{{ item.dest }}"
+
+    - name: "postgres: write compose env"
+      ansible.builtin.copy:
+        dest: "{{ server_dir }}/.env"
+        content: "POSTGRES_PASSWORD={{ db_password }}\n"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: "postgres: start + wait until healthy"
+      ansible.builtin.command:
+        cmd: docker compose up -d --wait
+        chdir: "{{ server_dir }}"
+      register: compose_up
+      changed_when: "'Started' in compose_up.stderr or 'Created' in compose_up.stderr"

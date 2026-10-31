@@ -1,0 +1,15 @@
+name: Proton marks
+on:
+  push:
+  pull_request:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: Euroton/WebClients
+          ref: euroton-0.1.0
+          path: webclients
+      - run: scripts/check-proton-marks.sh webclients

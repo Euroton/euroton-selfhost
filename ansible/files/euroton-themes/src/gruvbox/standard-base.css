@@ -1,0 +1,79 @@
+/*
+ * Theme: Gruvbox
+ */
+:root,
+.ui-standard {
+    --primary: #fe8019;
+
+    --signal-danger: #fb4934;
+
+    --signal-warning: #fabd2f;
+
+    --signal-success: #b8bb26;
+
+    --signal-info: #83a598;
+
+    --interaction-norm: #fe8019;
+
+    --interaction-weak: #504945;
+
+    --text-norm: #ebdbb2;
+    --text-weak: #bdae93;
+    --text-hint: #a89984;
+    --text-disabled: #665c54;
+    --text-invert: #282828;
+
+    --field-norm: #504945;
+    --field-hover: #665c54;
+    --field-disabled: #3c3836;
+
+    --focus-outline: #fe8019;
+    --focus-ring: rgb(254 128 25 / 0.3);
+
+    --border-norm: #504945;
+    --border-weak: #3c3836;
+
+    --background-norm: #282828;
+    --background-weak: #32302f;
+    --background-strong: #3c3836;
+    --background-invert: #ebdbb2;
+
+    --interaction-default: transparent;
+    --interaction-default-hover: rgb(80 73 69 / 0.5);
+    --interaction-default-active: rgb(80 73 69 / 0.7);
+
+    --shadow-norm-opacity: 0.5;
+    --shadow-raised-opacity: 0.44;
+    --shadow-lifted-opacity: 0.75;
+
+    --backdrop-norm: rgb(40 40 40 / 0.48);
+
+    /* Optional colors */
+
+    --optional-scrollbar-thumb-color: #504945;
+
+    --optional-link-norm: var(--interaction-norm-major-1);
+    --optional-link-hover: var(--interaction-norm-major-2);
+    --optional-link-active: var(--interaction-norm-major-3);
+
+    --optional-navigation-current-item-text-color: var(--signal-success);
+    --optional-navigation-item-count-background-color: #fe8019;
+
+    --optional-background-elevated: #32302f;
+    --optional-background-lowered: #1d2021;
+
+    --optional-email-item-read-text-color: var(--text-weak);
+
+    --optional-logo-text-proton-color: #ebdbb2;
+    --optional-logo-text-product-color: #ebdbb2;
+
+    --optional-promotion-text-color: #ebdbb2;
+    --optional-promotion-text-weak: #f3c982;
+    --optional-promotion-interaction-hover: rgb(254 128 25 / 0.2);
+    --optional-promotion-background-start: rgb(254 128 25 / 0.3);
+    --optional-promotion-background-end: rgb(215 153 33 / 0.1);
+    --optional-promotion-secondary-color: #d3869b;
+
+    --optional-bg-promotion-bw-button: var(--background-invert);
+    --optional-text-promotion-bw-button: var(--text-invert);
+}

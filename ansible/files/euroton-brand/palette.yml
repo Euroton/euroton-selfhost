@@ -1,0 +1,24 @@
+# Euroton placeholder palette (ADR 170 / H8). Used by the ansible
+# theme-color substitution task. Operator-replaceable; update hex
+# values then re-run the playbook.
+#
+# Layout: { proton_hex: euroton_hex } pairs. The ansible task does a
+# literal string replace across packages/colors/themes/src/*.css
+# for each pair, then re-runs `pnpm run build:theme` so the
+# compiled .theme.css files in themes/dist/ pick up the new values.
+#
+# Today's placeholder: swap Proton's primary purple (#6d4aff) for a
+# Euroton red tone consistent with the favicon + cooler tones for
+# the optional shadow primary RGB triple (109 74 255 -> Euroton).
+# Other Proton brand colors (the various accent / sentiment swatches)
+# stay because they're functional UI primitives (success green,
+# error red, etc.) not brand markers.
+
+substitutions:
+  # Primary purple → Euroton red.
+  "#6d4aff": "#d6362c"
+  # Shadow-primary RGB triple (decomposed because some themes use it
+  # in `rgba(var(--optional-shadow-primary-color), 0.5)` shape).
+  "109 74 255": "214 54 44"
+  # Capitalised variant — some themes spell hex uppercase.
+  "#6D4AFF": "#D6362C"

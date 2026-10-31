@@ -1,0 +1,309 @@
+# Copy to group_vars/all.yml and edit. The .yml file is gitignored.
+
+# Every hostname below derives from this. `.internal` is reserved by ICANN for
+# private use, so it never resolves on public DNS.
+domain: euroton.internal
+
+# Node version provision.yml installs.
+node_version: v22.23.4
+
+# Sources provision.yml clones. Pin to tags, not branches.
+repo_webclients: https://github.com/Euroton/WebClients.git
+repo_server: https://github.com/Euroton/euroton-server.git
+repo_godmode: https://github.com/Euroton/euroton-godmode.git
+version_webclients: euroton-0.1.0
+version_server: euroton-0.1.0
+version_godmode: euroton-0.1.0
+
+# Generated once on this machine under files/secrets/ (gitignored) & reused.
+db_password: "{{ lookup('ansible.builtin.password', playbook_dir ~ '/files/secrets/db_password', length=40, chars=['ascii_letters', 'digits']) }}"
+
+# Who can reach godmode & /admin. Caddy `remote_ip` syntax; `private_ranges`
+# covers RFC 1918 & loopback. Godmode has a SQL console: don't widen this.
+operator_allowed: private_ranges
+
+euroton_root: /opt/euroton
+mirror_dir: "{{ euroton_root }}/WebClients"
+server_dir: "{{ euroton_root }}/euroton-server"
+godmode_dir: "{{ euroton_root }}/euroton-godmode"
+
+# Where the playbook's smoke tests reach euroton-server, from the target itself.
+# The server binds loopback only; browsers go through Caddy.
+euroton_api_url: "https://127.0.0.1:4000"
+
+# App version baked into the SPA footer + app-version request header.
+# proton-pack has no --version flag and the rsynced mirror carries no
+# .git tags, so without this the build falls back to Proton's
+# 5.0.999.999 placeholder. Mirrors the upstream version line the fork is
+# pinned to; bump on each upstream re-sync (set to the precise Proton
+# version if known).
+euroton_app_version: "5.0.0"
+
+# TLS — self-signed CA + leaf generated on the control host, leaf
+# shipped to /etc/euroton/ssl/ on the target. The CA private key
+# never leaves the control host. See ansible/README.md "Trusting
+# the CA in the browser" for the manual trust-store install step.
+#
+# The leaf cert's SAN list and CN. Operator edits this when adding
+# new hostnames. Anything reachable in the LAN should be present
+# here (browser SNI matches against this list).
+#
+# `account-api.{{ domain }}` is in the list because upstream uses
+# `getApiSubdomainUrl(path, window.location.origin)` to derive the
+# API origin from the current app's hostname — `account.{{ domain }}`
+# → `account-api.{{ domain }}`. That call bypasses webpack's `/api`
+# proxy and hits the API directly, so the API hostname must resolve,
+# present a valid cert, and have something serving it. Caddy
+# (configured below) sits on `:443` and routes both `mail-api.*` and
+# `account-api.*` to euroton-server `:4000`.
+ssl_san_list: "DNS:mail.{{ domain }}, DNS:account.{{ domain }}, DNS:mail-api.{{ domain }}, DNS:account-api.{{ domain }}, DNS:godmode.{{ domain }}, DNS:calendar.{{ domain }}, DNS:localhost, IP:{{ ansible_host }}"
+ssl_leaf_cn: "mail.{{ domain }}"
+
+# Bearer token for the /admin/v1/* API that godmode calls (ADR 057).
+operator_token: "{{ lookup('ansible.builtin.password', playbook_dir ~ '/files/secrets/operator_token', length=48, chars=['ascii_letters', 'digits']) }}"
+
+# Caddy on :443 (ADR 245). Per-site `kind`:
+#   spa   — static file_server over the app's built `root`, with SPA
+#           rewrites (`spa_rewrites` mirror the app's src/.htaccess) and
+#           a same-origin /api + /internal-api reverse-proxy to
+#           euroton-server (replicates the old dev-server proxy / patch
+#           01, which ADR 033's cookie bootstrap relies on).
+#   proxy — plain reverse_proxy to backend_port; backend_scheme
+#           http|https (default https).
+caddy_sites:
+  - hostname: mail.{{ domain }}
+    kind: spa
+    root: "{{ mirror_dir }}/applications/mail/dist"
+    spa_rewrites:
+      - { match_path: "/eo /eo/*", to: "/eo.html" }
+      - { match_path: "/oauth/callback", to: "/oauth.html" }
+  - hostname: account.{{ domain }}
+    kind: spa
+    root: "{{ mirror_dir }}/applications/account/dist"
+    spa_rewrites:
+      - { match_path: "/u /u/*", to: "/private.html" }
+      - { match_path: "/lite /lite/*", to: "/lite/index.html" }
+      - { match_path: "/oauth/callback", to: "/oauth.html" }
+  - hostname: calendar.{{ domain }}
+    kind: spa
+    root: "{{ mirror_dir }}/applications/calendar/dist"
+  # Plain reverse-proxy hosts.
+  - hostname: mail-api.{{ domain }}
+    kind: proxy
+    backend_port: 4000
+  - hostname: account-api.{{ domain }}
+    kind: proxy
+    backend_port: 4000
+  # godmode (ADR 057): UI from Vite preview, /admin/* to euroton-server, and
+  # the whole site limited to operator_allowed.
+  - hostname: godmode.{{ domain }}
+    kind: godmode
+    backend_port: 8090
+
+# Per-app URL used in `favicon.config.js` for Open Graph / Twitter
+# card metadata, the favicon-webpack-plugin's manifest `start_url`,
+# and the og:image source. Upstream ships these hardcoded to
+# `https://mail.proton.me/` and `https://account.proton.me/`, which
+# means OG previews of links from a Euroton deployment expand using
+# Proton's hostname + og-image. ADR 107 substitutes these at deploy
+# time so each instance advertises its own hostname.
+#
+# Trailing slash is required (the source uses `${url}assets/...`
+# string concatenation).
+app_url_mail: "https://mail.{{ domain }}/"
+app_url_account: "https://account.{{ domain }}/"
+app_url_calendar: "https://calendar.{{ domain }}/"
+
+# Pass, VPN & Wallet have no working backend (most actions 404), so they aren't
+# built or routed. Their URLs stay defined because the build references them.
+app_url_pass: "https://pass.{{ domain }}/"
+app_url_vpn_settings: "https://vpn-settings.{{ domain }}/"
+app_url_wallet: "https://wallet.{{ domain }}/"
+
+# `<meta name="twitter:site">` attribution in the *.ejs templates
+# of the three in-scope apps. Upstream hardcodes `@ProtonMail` in 4
+# templates (mail/app, calendar/app, account/private, account/public);
+# Twitter / X uses this for the "via @account" line under unfurled
+# link previews. Until this substitution runs, every Euroton URL
+# shared on Twitter still attributes Proton.
+#
+# Your X handle for link previews, if you have one. Empty leaves the tag blank
+# rather than naming an account this project doesn't own (ADR 119).
+twitter_site: ""
+
+# PWA install metadata in `packages/pack/webpack/favicon.config.js`.
+# Upstream ships `developerName: 'Proton AG'` and
+# `developerURL: 'https://github.com/ProtonMail/WebClients'`, which
+# get threaded into the favicon-webpack-plugin's manifest +
+# browserconfig.xml -- so PWA install prompts and "about this app"
+# panels still attribute Proton AG as the developer behind a Euroton
+# deployment.
+#
+# Default to a generic Euroton attribution. Operators with their own
+# brand override these in `group_vars/all.yml`.
+#
+# ADR 118 substitutes both at deploy time, mirroring the ADR 107
+# favicon-URL pattern (anchored regex over the property literal).
+# Set true once a certificate from elsewhere (Let's Encrypt) is in
+# /etc/euroton/ssl/, so a re-run doesn't overwrite it. See POST-INSTALL.md.
+ssl_external: false
+
+# Name the server uses in authenticator apps & WebAuthn prompts.
+brand_name: "Euroton"
+
+developer_name: "Euroton"
+developer_url: "https://github.com/Euroton"
+
+# External status page the upstream `UnreachableTopBanner` links to
+# when the API is unreachable. Upstream hardcodes
+# `https://status.proton.me`, which is meaningless to users of a
+# Euroton deployment. ADR 110 substitutes this at deploy time so
+# each instance points users at the operator's own status board.
+#
+# Per-deployment: operators using Atlassian Statuspage, instatus,
+# Better Stack etc should put the real URL here; those without a
+# status board can leave the .local default in place (the banner
+# is shown only when /api is unreachable, an edge case).
+status_page_url: "https://status.{{ domain }}"
+
+# Which apps the playbook installs as systemd units. Order matters:
+# euroton-server first, then the dev servers (the latter depend on
+# the API being up via `Requires=euroton-server.service` in the unit).
+#
+# Each entry may set `port: <n>` to make the playbook wait for that
+# TCP port to listen after the unit starts. Omit `port` or set it
+# to `null` to skip the wait — handy for operators who run only the
+# backend and not the dev UIs (`account-dev` can be removed entirely
+# if you only need the mail UI).
+
+# `app_mode` selects how mail-dev and account-dev start. Two values:
+#
+#   sso        — `--appMode sso` is appended to the dev-server
+#                command lines. Sign-in routes through account.example.net
+#                (the upstream Proton-styled login UI) and the
+#                cross-app drawer renders real links to sibling
+#                apps. The fork-and-consume server protocol (ADR
+#                064) plus the AppLink fork-on-click patch (ADR
+#                095) plus the loadSession persisted-session
+#                fallback (ADR 096) make this the smooth posture
+#                for any deployment with two or more apps on
+#                separate subdomains. **Recommended default.**
+#
+#   standalone — webpack default, no `--appMode` flag. Each
+#                subdomain has its own independent session and the
+#                cross-app drawer renders disabled tooltips
+#                ("Disabled in standalone mode"). Useful for
+#                single-app deployments (mail only) or for
+#                debugging an issue specifically in the
+#                non-SSO codepath.
+#
+# Flip this and re-run the playbook to switch. The patches always
+# apply; their SSO branches are dormant unless `--appMode sso` is
+# in the command line, so the variable is a single-line flip.
+app_mode: sso
+
+services:
+  - name: euroton-server
+    cwd: "{{ server_dir }}"
+    cmd: "env HTTPS_KEY_PATH=/etc/euroton/ssl/euroton.key HTTPS_CERT_PATH=/etc/euroton/ssl/euroton.crt pnpm exec tsx src/index.ts"
+    log: /var/log/euroton/server.log
+    # OPERATOR_TOKEN + OPERATOR_ORIGIN for the godmode admin
+    # surface (ADR 057). The playbook writes this file from
+    # `operator_token` and the godmode hostname; the systemd
+    # unit reads it via EnvironmentFile=- (missing-OK so the
+    # service still boots if the operator hasn't enabled
+    # godmode yet).
+    env_file: /etc/euroton/server.env
+    # No port wait — the playbook gates on /health instead.
+    port: null
+  # ADR 245: the six webpack apps (mail/account/calendar/pass/
+  # vpn-settings/wallet) are no longer dev-servers. They are built to
+  # static SPAs (see `build_apps`) and served by Caddy file_server (see
+  # `caddy_sites` kind: spa). Only euroton-server and the godmode vite
+  # preview run as systemd units. This frees the ~14 GB the dev-servers
+  # spent on HMR and removes the boot-time compile-herd.
+  # godmode operator UI (ADR 057). Vite preview serves the built dist/
+  # — light (no HMR), HTTP on 127.0.0.1:8090. Drop this entry to
+  # disable godmode without further changes.
+  - name: godmode-dev
+    cwd: "{{ godmode_dir }}"
+    cmd: "pnpm exec vite preview --host 127.0.0.1 --port 8090 --strictPort"
+    log: /var/log/euroton/godmode-dev.log
+    port: 8090
+    # godmode-dev is plain HTTP (per caddy_sites backend_scheme: http);
+    # the default https probe URL would fail SSL handshake (ADR 183).
+    warmup_url: "http://127.0.0.1:8090/"
+
+# ADR 245: webpack apps built once to static SPAs, served by Caddy
+# file_server. `workspace` is the yarn workspace; `dist` is the build
+# output relative to mirror_dir. Built serially during the playbook
+# (each prod build peaks at GBs of RAM). API URL baked at build time
+# via `--api {{ euroton_api_url }}` (per-instance build).
+build_apps:
+  - { name: mail,         workspace: proton-mail,         dist: applications/mail/dist }
+  - { name: account,      workspace: proton-account,      dist: applications/account/dist }
+  - { name: calendar,     workspace: proton-calendar,     dist: applications/calendar/dist }
+
+# ─── Postfix MTA (ADR 232) ──────────────────────────────────────────
+#
+# The euroton-server SMTP edges (outbound dispatch + inbound LMTP +
+# DKIM + SPF/DMARC + spam + bounces, ADRs 129–140 + 231) are all
+# implemented in the server. They expect a Postfix MTA on the box:
+# outbound submission to 127.0.0.1:25, inbound :25 → LMTP 127.0.0.1:24.
+# This section installs + configures that MTA, plus the spamd daemon
+# (euroton-server's spamc client talks to it) and postgrey (greylisting
+# is a Postfix policy service, no server code). No opendkim — DKIM is
+# signed AND verified in-process by euroton-server.
+#
+# Default OFF: untested against live mail so far. Existing deploys are unaffected until the operator flips this on a real-domain host.
+postfix_enabled: false
+
+# The operator's real, DNS-resolvable mail domain and the MTA's
+# hostname. NEVER the .local dev names — Gmail/Outlook will 550 a
+# MAIL FROM:<@*.local> envelope. Publish MX/SPF/DKIM/DMARC for these
+# per docs/external-mail-setup.md before flipping the held queue.
+mail_domain: "example.org"
+mail_hostname: "mail.example.org"
+
+# Held-queue release switch. Leave 'none' until DNS records are live
+# and verified (outbound is recorded as 'skipped', nothing leaves the
+# box); flip to 'postfix' to actually deliver. Inbound LMTP is enabled
+# whenever postfix_enabled is true.
+mail_outbound_backend: "none"
+
+# Optional relay provider for outbound mail. Leave empty to deliver
+# directly from this host. See POST-INSTALL.md.
+mail_relayhost: ""
+mail_relay_user: ""
+mail_relay_password: ""
+
+# DKIM (ADR 131). Generate the keypair with euroton-server's
+# `scripts/dkim-keygen.ts`, drop the private key on the target at
+# mail_dkim_private_key_path, publish the printed TXT record, then set
+# enabled + selector + domain. Left disabled → mail goes out unsigned.
+mail_dkim_enabled: false
+mail_dkim_selector: ""
+mail_dkim_domain: "{{ mail_domain }}"
+mail_dkim_private_key_path: "/etc/euroton/dkim/{{ mail_dkim_selector }}.key"
+
+# Bounce ingest (ADR 133). The euroton-bounce Postfix pipe POSTs DSNs
+# to euroton-server with this token; VERP rewrites the outbound MAIL
+# FROM to bounces+<id>@<domain> so the DSN routes back with the id.
+# Generate with `openssl rand -hex 32`. Empty → ingest endpoint 503s
+# and VERP stays off.
+mail_bounce_ingest_token: ""
+
+# Inbound policy posture (ADRs 136/137/138). off | tag-only | spam-bin
+# | reject for SPF/DKIM; off | tag-only | honor for DMARC; off |
+# spamassassin for spam. Start permissive (tag-only) for a warm-up
+# week, then tighten. These feed euroton-server's MAIL_INBOUND_* env.
+mail_inbound_spf_policy: "tag-only"
+mail_inbound_dkim_policy: "tag-only"
+mail_inbound_dmarc_enforce: "tag-only"
+mail_inbound_spam_backend: "spamassassin"
+
+# Optional real TLS cert/key for STARTTLS on :25. Defaults to Debian's
+# snakeoil pair (STARTTLS still offered, just not trusted). Point at
+# the operator's real cert for trusted inbound TLS.
+# mail_tls_cert: "/etc/euroton/ssl/mail.crt"
+# mail_tls_key: "/etc/euroton/ssl/mail.key"

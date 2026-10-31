@@ -1,0 +1,43 @@
+#!/bin/bash
+# Managed by euroton-selfhost/ansible — do not edit by hand. ADR 232.
+#
+# Postfix `pipe` transport for VERP bounce DSNs. Postfix invokes this
+# with the original recipient as argv[1] (bounces+<deliveryId>@<domain>)
+# and the raw DSN message on stdin. We extract <deliveryId> and POST the
+# message to euroton-server's token-gated ingest endpoint (ADR 133),
+# which updates the outbound_deliveries row and injects a Mailer-Daemon
+# message into the sender's mailbox.
+#
+# Config comes from /etc/euroton/bounce-pipe.env (written by the
+# playbook): EUROTON_API_BASE + MAIL_OUTBOUND_BOUNCE_INGEST_TOKEN. That
+# file carries only the bounce-ingest capability (not the operator
+# token), so a leak lets an attacker forge bounce reports — low blast
+# radius on a single-tenant selfhost box.
+set -euo pipefail
+
+ENV_FILE=/etc/euroton/bounce-pipe.env
+[ -r "$ENV_FILE" ] && . "$ENV_FILE"
+
+API_BASE="${EUROTON_API_BASE:-https://127.0.0.1:4000}"
+TOKEN="${MAIL_OUTBOUND_BOUNCE_INGEST_TOKEN:-}"
+
+recipient="${1:-}"
+# bounces+<id>@<domain> -> strip up to the first '+', then the '@<domain>'.
+id="${recipient#*+}"
+id="${id%@*}"
+
+# No id (mis-routed mail) — accept + discard rather than loop-bounce.
+[ -n "$id" ] || exit 0
+
+# -k: euroton-server presents the instance's self-signed leaf on :4000.
+# Exit 75 (EX_TEMPFAIL) on failure so Postfix re-queues and retries the
+# DSN rather than dropping it.
+if curl -fsS -k --max-time 15 \
+    -X POST "${API_BASE}/mail/v1/bounces/${id}" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H "Content-Type: message/rfc822" \
+    --data-binary @- ; then
+    exit 0
+else
+    exit 75
+fi

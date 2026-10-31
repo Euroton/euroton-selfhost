@@ -1,0 +1,1468 @@
+---
+# Euroton selfhost deploy: per-instance config, dependency install, static
+# builds, services. Run provision.yml first; it installs the toolchain and
+# clones the sources.
+#
+#   cp inventory.example inventory.yml
+#   cp group_vars/all.example.yml group_vars/all.yml
+#   ansible-playbook -i inventory.yml provision.yml
+#   ansible-playbook -i inventory.yml playbook.yml
+
+- name: Deploy Euroton selfhost
+  hosts: all
+  become: true
+  gather_facts: true
+
+  # Ansible's SSH session has a TTY, so Corepack would otherwise wait
+  # forever on its "about to download" prompt.
+  environment:
+    COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+
+  tasks:
+    # ─── Pre-flight: fail fast on missing required variables ────────
+    #
+    # Variables added by recent debrand ADRs (107 / 110 / 118 / 119)
+    # are referenced by ansible.builtin.replace tasks deep in the
+    # play; if `all.yml` hasn't been updated to match `all.example.
+    # yml`, Jinja undefined errors fire mid-run with no obvious
+    # connection to the operator's actual problem. Assert every
+    # required key up-front and list any missing in the fail message.
+    # Cheaper to maintain than per-task default() fallbacks (the
+    # operator should make a deliberate choice, not silently inherit
+    # a Euroton-branded default they didn't opt into).
+    #
+    # ADR 122.
+
+    - name: "preflight: assert required variables defined"
+      ansible.builtin.assert:
+        that:
+          - "(item | default(None)) is not none"
+        fail_msg: >-
+          required variable `{{ item_name }}` is missing from
+          `group_vars/all.yml`. This usually means a recent ADR
+          added a new variable to `all.example.yml` that hasn't
+          been copied into your local `all.yml` yet. Either:
+            (a) `diff group_vars/all.example.yml group_vars/all.yml`
+                to see what's new, then add it; or
+            (b) re-bootstrap with
+                `cp group_vars/all.example.yml group_vars/all.yml`
+                and edit your operator-specific overrides back in.
+          See `euroton-server/docs/decisions/122-ansible-var-
+          precheck.md` for the full required-vars list and the
+          rationale.
+      loop:
+        - "{{ euroton_root | default(None) }}"
+        - "{{ mirror_dir | default(None) }}"
+        - "{{ server_dir | default(None) }}"
+        - "{{ euroton_api_url | default(None) }}"
+        - "{{ ssl_san_list | default(None) }}"
+        - "{{ ssl_leaf_cn | default(None) }}"
+        - "{{ caddy_sites | default(None) }}"
+        - "{{ services | default(None) }}"
+        - "{{ app_url_mail | default(None) }}"
+        - "{{ app_url_account | default(None) }}"
+        - "{{ app_url_calendar | default(None) }}"
+        - "{{ app_url_pass | default(None) }}"
+        - "{{ app_url_vpn_settings | default(None) }}"
+        - "{{ app_url_wallet | default(None) }}"
+        - "{{ status_page_url | default(None) }}"
+        - "{{ developer_name | default(None) }}"
+        - "{{ developer_url | default(None) }}"
+        - "{{ twitter_site | default(None) }}"
+        - "{{ app_mode | default(None) }}"
+      loop_control:
+        loop_var: item
+        index_var: item_idx
+        extended: true
+        label: "{{ item_name }}"
+      vars:
+        # Index-aligned with the loop above. The list itself isn't
+        # auto-derivable from the loop (the loop emits resolved
+        # values, not the variable names) so the operator gets a
+        # specific name in the fail_msg for whichever variable is
+        # undefined.
+        _required_names:
+          - euroton_root
+          - mirror_dir
+          - server_dir
+          - euroton_api_url
+          - ssl_san_list
+          - ssl_leaf_cn
+          - caddy_sites
+          - services
+          - app_url_mail
+          - app_url_account
+          - app_url_calendar
+          - app_url_pass
+          - app_url_vpn_settings
+          - app_url_wallet
+          - status_page_url
+          - developer_name
+          - developer_url
+          - twitter_site
+          - app_mode
+        item_name: "{{ _required_names[item_idx] }}"
+
+    # ─── Pre-flight: fail fast with a clear message ─────────────────
+    #
+    # provision.yml clones the sources; catch a skipped provision here.
+
+    - name: "preflight: check mirror_dir exists"
+      ansible.builtin.stat:
+        path: "{{ mirror_dir }}"
+      register: pf_mirror
+
+    - name: "preflight: check server_dir exists"
+      ansible.builtin.stat:
+        path: "{{ server_dir }}"
+      register: pf_server
+
+    - name: "preflight: check godmode_dir exists (only if godmode-dev is enabled)"
+      ansible.builtin.stat:
+        path: "{{ godmode_dir }}"
+      register: pf_godmode
+      when: services | selectattr('name', 'equalto', 'godmode-dev') | list | length > 0
+
+    - name: "preflight: assert prerequisites"
+      ansible.builtin.assert:
+        that:
+          - pf_mirror.stat.exists and pf_mirror.stat.isdir
+          - pf_server.stat.exists and pf_server.stat.isdir
+          - (services | selectattr('name', 'equalto', 'godmode-dev') | list | length == 0) or
+            (pf_godmode.stat.exists and pf_godmode.stat.isdir)
+        fail_msg: >-
+          {{ mirror_dir }}, {{ server_dir }} and {{ godmode_dir }} must exist.
+          Run provision.yml first.
+        success_msg: "source trees in place"
+
+    - name: "preflight: required binaries"
+      # We only care that each tool is on PATH, not what version it is.
+      ansible.builtin.command:
+        cmd: "which {{ item }}"
+      loop: [node, pnpm, yarn]
+      changed_when: false
+      register: pf_bins
+      failed_when: pf_bins.rc != 0
+
+    # ─── Install Caddy early (creates the `caddy` user/group) ──────
+    #
+    # The SSL key copy below needs to ship the leaf to the target
+    # with group=caddy so Caddy (which runs as user `caddy`) can
+    # read it. The user/group are created by the caddy apt package
+    # post-install, so we install Caddy before the SSL copy. Caddyfile
+    # and systemd unit are configured later in the playbook once the
+    # backends are healthy.
+
+    - name: "caddy: ensure /etc/apt/keyrings exists"
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: "caddy: fetch cloudsmith signing key"
+      ansible.builtin.get_url:
+        url: https://dl.cloudsmith.io/public/caddy/stable/gpg.key
+        dest: /tmp/caddy-stable.gpg.asc
+        mode: "0644"
+
+    - name: "caddy: dearmor key into apt keyring"
+      ansible.builtin.command:
+        cmd: "gpg --batch --yes --dearmor -o /etc/apt/keyrings/caddy-stable.gpg /tmp/caddy-stable.gpg.asc"
+        creates: /etc/apt/keyrings/caddy-stable.gpg
+
+    - name: "caddy: register stable apt repo"
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/caddy-stable.list
+        content: "deb [signed-by=/etc/apt/keyrings/caddy-stable.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main\n"
+        mode: "0644"
+      register: caddy_repo
+
+    - name: "caddy: apt update if repo just added"
+      ansible.builtin.apt:
+        update_cache: yes
+      when: caddy_repo.changed
+
+    - name: "caddy: install (creates caddy user/group)"
+      ansible.builtin.apt:
+        name: caddy
+        state: present
+
+    # ─── TLS cert: self-signed CA + leaf on control host ────────────
+    #
+    # CA private key never leaves the control host. Leaf key+cert and
+    # CA cert ship to /etc/euroton/ssl/ on the target. Idempotent: if
+    # the leaf is still valid (>24h until expiry), nothing happens.
+    # CA renews if <30 days remain on its self-signed cert.
+
+    - name: "ssl: ensure control-host files/ssl/ dir exists"
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/files/ssl"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: "ssl: probe leaf cert (validity + SAN list match)"
+      # Triggers regen when EITHER the cert is within 24h of expiry
+      # OR its SAN list has diverged from the configured ssl_san_list
+      # (e.g. operator added a new hostname like account-api.euroton.local).
+      # openssl's `req`/`x509 -ext` *input* syntax uses `IP:1.2.3.4` but
+      # its display *output* says `IP Address:1.2.3.4` — normalize the
+      # output back to input form before comparing.
+      # Exit non-zero on any mismatch — the regen task gates on `rc != 0`.
+      ansible.builtin.shell: |
+        set -e
+        cert="{{ playbook_dir }}/files/ssl/euroton.crt"
+        [ -f "$cert" ] || { echo "no cert yet"; exit 1; }
+        openssl x509 -in "$cert" -checkend 86400 -noout
+        current=$(openssl x509 -in "$cert" -noout -ext subjectAltName 2>/dev/null \
+          | grep -v 'X509v3 Subject Alternative Name' \
+          | tr -d '\n' \
+          | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/IP Address:/IP:/g')
+        expected="{{ ssl_san_list }}"
+        if [ "$current" != "$expected" ]; then
+          echo "SAN drift:"
+          echo "  current:  $current"
+          echo "  expected: $expected"
+          exit 1
+        fi
+      register: leaf_probe
+      delegate_to: localhost
+      become: false
+      run_once: true
+      changed_when: false
+      failed_when: false
+
+    - name: "ssl: generate CA + leaf (only if leaf missing or near-expiry)"
+      ansible.builtin.shell: |
+        set -e
+        cd "{{ playbook_dir }}/files/ssl"
+
+        if [ ! -f euroton-ca.key ]; then
+          openssl genrsa -out euroton-ca.key 4096
+          chmod 0600 euroton-ca.key
+        fi
+
+        if [ ! -f euroton-ca.crt ] || ! openssl x509 -in euroton-ca.crt -checkend 2592000 -noout >/dev/null 2>&1; then
+          openssl req -x509 -new -key euroton-ca.key -sha256 -days 3650 \
+            -out euroton-ca.crt \
+            -subj '/CN=Euroton selfhost root CA'
+        fi
+
+        if [ ! -f euroton.key ]; then
+          openssl genrsa -out euroton.key 2048
+          chmod 0600 euroton.key
+        fi
+
+        cat > euroton-leaf.ext <<EOF
+        subjectAltName = {{ ssl_san_list }}
+        extendedKeyUsage = serverAuth
+        EOF
+
+        openssl req -new -key euroton.key -out euroton.csr -subj '/CN={{ ssl_leaf_cn }}'
+        openssl x509 -req -in euroton.csr -CA euroton-ca.crt -CAkey euroton-ca.key \
+          -CAcreateserial -out euroton.crt -days 365 -sha256 -extfile euroton-leaf.ext
+        rm -f euroton.csr euroton-leaf.ext
+      args:
+        executable: /bin/bash
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: ssl_gen
+      changed_when: ssl_gen.rc == 0
+      when: leaf_probe.rc != 0 and not (ssl_external | default(false))
+
+    # ─── TLS cert: ship to target /etc/euroton/ssl/ ─────────────────
+
+    - name: "ssl: ensure /etc/euroton/ssl on target"
+      ansible.builtin.file:
+        path: /etc/euroton/ssl
+        state: directory
+        mode: "0755"
+
+    - name: "ssl: copy leaf private key to target (caddy group readable)"
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/files/ssl/euroton.key"
+        dest: /etc/euroton/ssl/euroton.key
+        owner: root
+        group: caddy
+        mode: "0640"
+      register: ssl_key_copied
+      when: not (ssl_external | default(false))
+
+    - name: "ssl: copy leaf cert to target"
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/files/ssl/euroton.crt"
+        dest: /etc/euroton/ssl/euroton.crt
+        mode: "0644"
+      register: ssl_crt_copied
+      when: not (ssl_external | default(false))
+
+    - name: "ssl: copy CA cert to target (for browser trust-store install)"
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/files/ssl/euroton-ca.crt"
+        dest: /etc/euroton/ssl/euroton-ca.crt
+        mode: "0644"
+      when: not (ssl_external | default(false))
+
+    # ─── Patches ────────────────────────────────────────────────────
+
+    # ADR 099 (2026-06-10): patch 04 (applink-sso-fork-urls) reverted.
+    # The fork-on-click logic from ADR 095 broke cross-app drawer
+    # navigation when the target app already had a session — account-
+    # app's PublicAppInitial blocking-effect fired before consume,
+    # routed to /apps (SSO app switcher) instead of the deep settings
+    # path. Upstream's plain `getAppHref` URL is correct for the SSO
+    # use case where account.example.net always has a session post-sign-in;
+    # the "no session at target" edge case ADR 095 tried to fix is
+    # rare in practice. See ADR 099.
+
+    # ADR 107. The `const url = '...'` line at the top of each
+    # favicon.config.js feeds the OG/Twitter card URLs + manifest
+    # start_url + og:image source. Upstream pins these to
+    # `mail.proton.me` / `account.proton.me`. We substitute the
+    # operator's hostnames here rather than in the patch because the
+    # value is per-deployment (each instance advertises its own
+    # `app_url_mail` + `app_url_account`). Matches the SRP modulus
+    # substitution pattern below — regex anchored on `const url`,
+    # idempotent across re-runs.
+    - name: "patches: substitute mail app URL into favicon.config.js"
+      ansible.builtin.replace:
+        path: "{{ mirror_dir }}/applications/mail/favicon.config.js"
+        regexp: "(const url = ')[^']*(';)"
+        replace: "\\1{{ app_url_mail }}\\2"
+      register: app_url_replace_mail
+
+    - name: "patches: substitute account app URL into favicon.config.js"
+      ansible.builtin.replace:
+        path: "{{ mirror_dir }}/applications/account/favicon.config.js"
+        regexp: "(const url = ')[^']*(';)"
+        replace: "\\1{{ app_url_account }}\\2"
+      register: app_url_replace_account
+
+    # ADR 124. Calendar mirrors the mail + account pattern even though
+    # calendar isn't yet deployed via Caddy on selfhost (calendar dev
+    # server isn't in the `services` group_vars block). favicon.config
+    # .js is still read at build time, so the substitution is wired up
+    # ready for when calendar enters services -- and any operator who
+    # builds the calendar bundle ahead of `services` integration gets
+    # the rebranded URL immediately.
+    - name: "patches: substitute calendar app URL into favicon.config.js"
+      ansible.builtin.replace:
+        path: "{{ mirror_dir }}/applications/calendar/favicon.config.js"
+        regexp: "(const url = ')[^']*(';)"
+        replace: "\\1{{ app_url_calendar }}\\2"
+      register: app_url_replace_calendar
+
+    # ADR 126 discovery-mode apps. Same regex shape as the other
+    # app URL substitutions; per-deployment value (defaults to the
+    # local subdomain). vpn-settings' upstream URL is the odd one
+    # out (`account.protonvpn.com` rather than `vpn-settings.proton
+    # .me`) but the regex anchors on `const url` and doesn't care.
+    - name: "patches: substitute pass app URL into favicon.config.js"
+      ansible.builtin.replace:
+        path: "{{ mirror_dir }}/applications/pass/favicon.config.js"
+        regexp: "(const url = ')[^']*(';)"
+        replace: "\\1{{ app_url_pass }}\\2"
+      register: app_url_replace_pass
+
+    - name: "patches: substitute vpn-settings app URL into favicon.config.js"
+      ansible.builtin.replace:
+        path: "{{ mirror_dir }}/applications/vpn-settings/favicon.config.js"
+        regexp: "(const url = ')[^']*(';)"
+        replace: "\\1{{ app_url_vpn_settings }}\\2"
+      register: app_url_replace_vpn_settings
+
+    - name: "patches: substitute wallet app URL into favicon.config.js"
+      ansible.builtin.replace:
+        path: "{{ mirror_dir }}/applications/wallet/favicon.config.js"
+        regexp: "(const url = ')[^']*(';)"
+        replace: "\\1{{ app_url_wallet }}\\2"
+      register: app_url_replace_wallet
+
+    # ADR 110. Replaces the hardcoded `PROTON_STATUS_PAGE` enum
+    # member in packages/shared/lib/constants.ts so the
+    # UnreachableTopBanner's "status page" link points at the
+    # operator's actual status board instead of status.proton.me.
+    # Per-deployment value -- static patch doesn't fit; matches the
+    # ADR 107 favicon-URL substitution shape.
+    - name: "patches: substitute PROTON_STATUS_PAGE in constants.ts"
+      ansible.builtin.replace:
+        path: "{{ mirror_dir }}/packages/shared/lib/constants.ts"
+        regexp: "(PROTON_STATUS_PAGE = ')[^']*(',)"
+        replace: "\\1{{ status_page_url }}\\2"
+      register: status_page_url_replace
+
+    # ADR 118. Substitutes `developerName: 'Proton AG'` and
+    # `developerURL: 'https://github.com/ProtonMail/WebClients'` in
+    # the shared packages/pack/webpack/favicon.config.js. The
+    # favicon-webpack-plugin threads both fields into the PWA manifest
+    # + browserconfig.xml, so PWA install prompts and "about this app"
+    # panels still attribute Proton AG as the developer behind a
+    # Euroton deployment until this substitution runs. Per-deployment
+    # value -- one operator brands as Euroton, another as their own
+    # company; same shape as the ADR 107 favicon-URL pattern.
+    - name: "patches: substitute developerName in shared favicon config"
+      ansible.builtin.replace:
+        path: "{{ mirror_dir }}/packages/pack/webpack/favicon.config.js"
+        regexp: "(developerName: ')[^']*(',)"
+        replace: "\\1{{ developer_name }}\\2"
+      register: developer_name_replace
+
+    - name: "patches: substitute developerURL in shared favicon config"
+      ansible.builtin.replace:
+        path: "{{ mirror_dir }}/packages/pack/webpack/favicon.config.js"
+        regexp: "(developerURL: ')[^']*(',)"
+        replace: "\\1{{ developer_url }}\\2"
+      register: developer_url_replace
+
+    # ADR 119. The `<meta name="twitter:site" content="@ProtonMail">`
+    # tag in 4 .ejs templates (mail/app, calendar/app,
+    # account/{private,public}) controls the "via @account" line
+    # under Twitter / X link unfurls. Per-deployment value -- one
+    # operator overrides with their own handle, the default claims
+    # a placeholder. Loop over the 4 paths so the same substitution
+    # ships across all three in-scope apps in one task.
+    - name: "patches: substitute twitter:site across .ejs templates"
+      ansible.builtin.replace:
+        path: "{{ mirror_dir }}/applications/{{ item }}.ejs"
+        regexp: '(<meta name="twitter:site" content=")[^"]*(">)'
+        replace: '\1{{ twitter_site }}\2'
+      loop:
+        - mail/src/app
+        - calendar/src/app
+        - account/src/private
+        - account/src/public
+      register: twitter_site_replace
+
+    # ADR 170 (H7 + H8) + ADR 177: Euroton brand assets. Per-app
+    # favicon is now the matching `euroton-brand/logos/<product>/
+    # glyph.svg` (ADR 177 collapsed the standalone favicon.svg into
+    # the per-product glyph). The palette swap still iterates the
+    # theme CSS. Operator-replaceable: edit
+    # `ansible/files/euroton-brand/logos/<product>/<variant>.svg`
+    # in place and re-run the playbook.
+    - name: "patches: copy Euroton per-app glyph SVG as src/favicon.svg"
+      ansible.builtin.copy:
+        src: "euroton-brand/logos/{{ item.product }}/glyph.svg"
+        dest: "{{ mirror_dir }}/applications/{{ item.app }}/src/favicon.svg"
+        mode: "0644"
+      loop:
+        - { app: mail,         product: mail }
+        - { app: account,      product: proton }
+        - { app: calendar,     product: calendar }
+        - { app: pass,         product: pass }
+        - { app: vpn-settings, product: vpn }
+        - { app: wallet,       product: wallet }
+      loop_control:
+        label: "{{ item.app }} ← {{ item.product }}/glyph.svg"
+      register: favicon_svg_copy
+
+    - name: "patches: find theme CSS files for palette substitution"
+      ansible.builtin.find:
+        paths: "{{ mirror_dir }}/packages/colors/themes/src"
+        patterns: "*.css"
+        recurse: true
+      register: theme_css_files
+
+    - name: "patches: swap Proton primary purple #6d4aff -> Euroton red"
+      ansible.builtin.replace:
+        path: "{{ item.path }}"
+        regexp: "#6d4aff"
+        replace: "#d6362c"
+      loop: "{{ theme_css_files.files }}"
+      loop_control:
+        label: "{{ item.path | regex_replace('^.*/themes/src/', '') }}"
+      register: palette_replace_lower
+
+    - name: "patches: swap uppercase variant #6D4AFF -> #D6362C"
+      ansible.builtin.replace:
+        path: "{{ item.path }}"
+        regexp: "#6D4AFF"
+        replace: "#D6362C"
+      loop: "{{ theme_css_files.files }}"
+      loop_control:
+        label: "{{ item.path | regex_replace('^.*/themes/src/', '') }}"
+      register: palette_replace_upper
+
+    - name: "patches: swap RGB triple '109 74 255' -> '214 54 44'"
+      ansible.builtin.replace:
+        path: "{{ item.path }}"
+        regexp: "109 74 255"
+        replace: "214 54 44"
+      loop: "{{ theme_css_files.files }}"
+      loop_control:
+        label: "{{ item.path | regex_replace('^.*/themes/src/', '') }}"
+      register: palette_replace_rgb
+
+    # ADR 170 follow-up (dark-theme reverification it deferred). ADR 170
+    # swapped only #6d4aff; the *dark-mode* primary is a brighter purple
+    # #8a6eff (carbon / lumo-dark / duotone-prominent / storefront), so
+    # `.color-primary { color: var(--primary) }` stayed purple in dark mode
+    # at /login. Same #d6362c Euroton red.
+    - name: "patches: swap dark-mode primary #8a6eff -> Euroton red"
+      ansible.builtin.replace:
+        path: "{{ item.path }}"
+        regexp: "#8a6eff"
+        replace: "#d6362c"
+      loop: "{{ theme_css_files.files }}"
+      loop_control:
+        label: "{{ item.path | regex_replace('^.*/themes/src/', '') }}"
+      register: palette_replace_8a6_lower
+
+    - name: "patches: swap dark-mode primary #8A6EFF -> #D6362C (uppercase)"
+      ansible.builtin.replace:
+        path: "{{ item.path }}"
+        regexp: "#8A6EFF"
+        replace: "#D6362C"
+      loop: "{{ theme_css_files.files }}"
+      loop_control:
+        label: "{{ item.path | regex_replace('^.*/themes/src/', '') }}"
+      register: palette_replace_8a6_upper
+
+    # The prominent (sidebar / dark) variants use #413085 -- a dark purple --
+    # for --optional-scrollbar-thumb-color AND --border-norm (duotone /
+    # storefront prominent-base). ADR 170's #6d4aff swap missed it, so the
+    # scrollbar thumb + prominent borders stayed Proton purple. Dark-red
+    # equivalent #853030.
+    - name: "patches: swap prominent scrollbar/border #413085 -> dark red"
+      ansible.builtin.replace:
+        path: "{{ item.path }}"
+        regexp: "#413085"
+        replace: "#853030"
+      loop: "{{ theme_css_files.files }}"
+      loop_control:
+        label: "{{ item.path | regex_replace('^.*/themes/src/', '') }}"
+      register: palette_replace_413
+
+    # Two more brand-purple surfaces ADR 170 missed because they live
+    # outside packages/colors/themes/src (so the theme-CSS loop never
+    # touched them): the public sign-layout radial-gradient backdrop
+    # (Layout.scss), and the animated loading logo (ProtonLoader,
+    # shared by every app). Swap the purples to dark-red / Euroton red so
+    # /login and the load splash aren't purple.
+    - name: "patches: debrand sign-layout gradient + ProtonLoader logo purples"
+      ansible.builtin.replace:
+        path: "{{ mirror_dir }}/{{ item.path }}"
+        regexp: "{{ item.regexp }}"
+        replace: "{{ item.replace }}"
+      loop:
+        - { path: "applications/account/src/app/public/Layout.scss", regexp: "#221850", replace: "#2e1015" }
+        - { path: "applications/account/src/app/public/Layout.scss", regexp: "#191333", replace: "#1d0a0d" }
+        - { path: "applications/account/src/app/public/Layout.scss", regexp: "#6d4aff", replace: "#d6362c" }
+        - { path: "packages/atoms/src/ProtonLoader/ProtonLoader.tsx", regexp: "#6D4AFF", replace: "#D6362C" }
+        - { path: "packages/atoms/src/ProtonLoader/ProtonLoader.tsx", regexp: "#6D4BFD", replace: "#D6362C" }
+        - { path: "packages/atoms/src/ProtonLoader/ProtonLoader.tsx", regexp: "#1C0554", replace: "#3a0a08" }
+      loop_control:
+        label: "{{ item.path | regex_replace('^.*/', '') }} {{ item.regexp }}"
+      register: brand_purple_sweep
+
+    # The public auth pages (/login, /signup) use the `storefront` theme,
+    # whose entire background/text ramp is purple-tinted (unlike snow /
+    # duotone / classic, which use neutral warm grays) -- so even after the
+    # primary/gradient swaps the page kept a faint lavender base. Neutralize
+    # storefront's ramp to the snow-equivalent neutrals (light) + neutral
+    # darks (prominent), so the backdrop reads clean. --primary / focus /
+    # interaction-norm purples are already handled by the #6d4aff/#8a6eff
+    # swaps above.
+    - name: "patches: neutralize storefront purple background ramp"
+      ansible.builtin.replace:
+        path: "{{ mirror_dir }}/{{ item.path }}"
+        regexp: "{{ item.regexp }}"
+        replace: "{{ item.replace }}"
+      loop:
+        # storefront/standard-base (light): lavender bg + dark-purple text/invert
+        - { path: "packages/colors/themes/src/storefront/standard-base.css", regexp: "#EEEBFA", replace: "#f5f4f2" }
+        - { path: "packages/colors/themes/src/storefront/standard-base.css", regexp: "#DED7F7", replace: "#e5e4e1" }
+        - { path: "packages/colors/themes/src/storefront/standard-base.css", regexp: "#0F004D", replace: "#0c0c14" }
+        - { path: "packages/colors/themes/src/storefront/standard-base.css", regexp: "15 0 77", replace: "38 42 51" }
+        # storefront/prominent-base (dark): dark-purple bg ramp
+        - { path: "packages/colors/themes/src/storefront/prominent-base.css", regexp: "#1D1738", replace: "#1c1b22" }
+        - { path: "packages/colors/themes/src/storefront/prominent-base.css", regexp: "#2A2348", replace: "#28272f" }
+        - { path: "packages/colors/themes/src/storefront/prominent-base.css", regexp: "#3F3760", replace: "#3a3942" }
+      loop_control:
+        label: "{{ item.path | regex_replace('^.*/themes/src/', '') }} {{ item.regexp }}"
+      register: storefront_neutralize
+
+    # storefront ACCENT tokens (beyond the bg ramp above): links, banners,
+    # borders, weak/disabled text, the promotion-text colors, and the
+    # prominent-variant ramp -- ~20 violet shades that surface on the b2b
+    # signup (/mail/signup/business). Vivid accents -> Euroton red hue;
+    # muted/structural shades -> desaturated to warm gray (hue-shift pass,
+    # scoped to the storefront files only so other themes are untouched --
+    # public/signup chrome only). Plus the b2b side-panel gradient #392982
+    # in the single-signup Layout.scss files.
+    - name: "patches: recolor storefront accent purples + b2b side-panel"
+      ansible.builtin.replace:
+        path: "{{ mirror_dir }}/{{ item.path }}"
+        regexp: "{{ item.regexp }}"
+        replace: "{{ item.replace }}"
+      # (?i) -- the storefront hexes are mixed-case in the source
+      # (e.g. #9880FF / #C1B2FF uppercase, #50409b lowercase) and
+      # ansible.builtin.replace is case-sensitive by default.
+      loop:
+        - { path: "packages/colors/themes/src/storefront/standard-base.css", regexp: "(?i)#776e94", replace: "#847f7e" }
+        - { path: "packages/colors/themes/src/storefront/standard-base.css", regexp: "(?i)#8c86a6", replace: "#999593" }
+        - { path: "packages/colors/themes/src/storefront/standard-base.css", regexp: "(?i)#b9b5c8", replace: "#c0bebd" }
+        - { path: "packages/colors/themes/src/storefront/standard-base.css", regexp: "(?i)#b1a8d5", replace: "#c3bcba" }
+        - { path: "packages/colors/themes/src/storefront/standard-base.css", regexp: "(?i)#867cb0", replace: "#9b9491" }
+        - { path: "packages/colors/themes/src/storefront/standard-base.css", regexp: "(?i)#c2b9e5", replace: "#e5bdb9" }
+        - { path: "packages/colors/themes/src/storefront/standard-base.css", regexp: "(?i)#dfdaf4", replace: "#f4dcda" }
+        - { path: "packages/colors/themes/src/storefront/standard-base.css", regexp: "(?i)#15006f", replace: "#5f1610" }
+        - { path: "packages/colors/themes/src/storefront/standard-base.css", regexp: "(?i)#50409b", replace: "#766965" }
+        - { path: "packages/colors/themes/src/storefront/standard-base.css", regexp: "(?i)#d783ff", replace: "#ee9c94" }
+        - { path: "packages/colors/themes/src/storefront/prominent-base.css", regexp: "(?i)#4a426c", replace: "#5b5553" }
+        - { path: "packages/colors/themes/src/storefront/prominent-base.css", regexp: "(?i)#a8a2c0", replace: "#b4b0ae" }
+        - { path: "packages/colors/themes/src/storefront/prominent-base.css", regexp: "(?i)#756c98", replace: "#86807e" }
+        - { path: "packages/colors/themes/src/storefront/prominent-base.css", regexp: "(?i)#635b86", replace: "#746f6d" }
+        - { path: "packages/colors/themes/src/storefront/prominent-base.css", regexp: "(?i)#342d54", replace: "#443f3d" }
+        - { path: "packages/colors/themes/src/storefront/prominent-base.css", regexp: "(?i)#5c537f", replace: "#6d6765" }
+        - { path: "packages/colors/themes/src/storefront/prominent-base.css", regexp: "(?i)#9880ff", replace: "#ed9992" }
+        - { path: "packages/colors/themes/src/storefront/prominent-base.css", regexp: "(?i)#a898ed", replace: "#ed9f98" }
+        - { path: "packages/colors/themes/src/storefront/prominent-base.css", regexp: "(?i)#bbabff", replace: "#f3bcb7" }
+        - { path: "packages/colors/themes/src/storefront/prominent-base.css", regexp: "(?i)#c1b2ff", replace: "#f4c1bd" }
+        - { path: "applications/account/src/app/single-signup/Layout.scss", regexp: "#392982", replace: "#823029" }
+        - { path: "applications/account/src/app/single-signup-v2/Layout.scss", regexp: "#392982", replace: "#823029" }
+        # Recommended plan-card glow: --card-box-shadow-color{1-4} multi-stop
+        # box-shadow (purple stops + one peach #246 198 146 which stays).
+        # rgb-triple swaps purple -> red; applied to both v2 SCSS files.
+        - { path: "applications/account/src/app/single-signup-v2/Layout.scss", regexp: "172 154 247", replace: "241 166 160" }
+        - { path: "applications/account/src/app/single-signup-v2/Layout.scss", regexp: "172 154 246", replace: "241 166 159" }
+        - { path: "applications/account/src/app/single-signup-v2/Layout.scss", regexp: "108 73 254", replace: "232 106 95" }
+        - { path: "applications/account/src/app/single-signup-v2/Layout.scss", regexp: "108 73 255", replace: "232 107 96" }
+        - { path: "applications/account/src/app/single-signup-v2/Layout.scss", regexp: "205 79 232", replace: "230 93 81" }
+        - { path: "applications/account/src/app/single-signup-v2/PlanCardSelector.scss", regexp: "172 154 247", replace: "241 166 160" }
+        - { path: "applications/account/src/app/single-signup-v2/PlanCardSelector.scss", regexp: "172 154 246", replace: "241 166 159" }
+        - { path: "applications/account/src/app/single-signup-v2/PlanCardSelector.scss", regexp: "108 73 254", replace: "232 106 95" }
+        - { path: "applications/account/src/app/single-signup-v2/PlanCardSelector.scss", regexp: "108 73 255", replace: "232 107 96" }
+        - { path: "applications/account/src/app/single-signup-v2/PlanCardSelector.scss", regexp: "205 79 232", replace: "230 93 81" }
+      loop_control:
+        label: "{{ item.path | regex_replace('^.*/', '') }} {{ item.regexp }}"
+      register: storefront_accents
+
+    # ADR 175 + ADR 177: per-app logo injection. Every SVG under
+    # `ansible/files/euroton-brand/logos/<product>/<variant>.svg`
+    # is editable artwork (no overlay/reference split post-ADR-177).
+    # The script validates each viewBox against `logos/manifest.yml`
+    # then injects the SVG body into the matching variant block of
+    # upstream's `<Product>Logo.tsx`. Fail-fast on viewBox mismatch.
+    # ADR 179: inject-logos.py uses `import yaml` to parse the
+    # manifest. PyYAML is on the ansible controller (ansible-core
+    # requires it) but not necessarily on the LXC's system Python.
+    # Install once; idempotent. apt was previously the LXC's wedge
+    # surface (ADR 178), so this stays a single small install
+    # rather than mixing other deps.
+    - name: "patches: ensure python3-yaml on target (ADR 179)"
+      ansible.builtin.apt:
+        name: python3-yaml
+        state: present
+        update_cache: false
+
+    - name: "patches: copy logo tree to target"
+      ansible.builtin.copy:
+        src: euroton-brand/logos/
+        dest: "/var/lib/euroton-brand/logos/"
+        mode: "0644"
+        directory_mode: "0755"
+      register: logo_overlay_tree
+
+    - name: "patches: inject Euroton logos into mirror"
+      ansible.builtin.command:
+        cmd: >-
+          python3 /var/lib/euroton-brand/logos/inject-logos.py
+          --mirror {{ mirror_dir }}
+          --logos-dir /var/lib/euroton-brand/logos
+          --manifest /var/lib/euroton-brand/logos/manifest.yml
+      register: logo_inject
+      changed_when: >-
+        (logo_inject.stdout | from_json).changed | default(false)
+      failed_when: logo_inject.rc != 0
+
+    - name: "patches: brand-resync locale catalogs (ADR 112)"
+      # ADR 112. Debrand part 6 -- msgstr-level substitute of "Proton"
+      # to "Euroton" inside non-English translations across
+      # applications/{mail,account,calendar}/locales/*.json. ADR 108's
+      # BRAND_NAME swap already covers source-code templates that use
+      # the ${BRAND_NAME} interpolation; this script covers the
+      # remaining cases where translators inlined the literal brand
+      # ("Problème avec Proton Mail" etc.). Preserves context-name
+      # keys (source-addressed via c('<name>')) and ${ ... } placeholder
+      # identifiers by construction. Idempotent: prints `0 ... 0` on
+      # re-runs.
+      ansible.builtin.script:
+        cmd: "files/locale-brand-resync.py {{ mirror_dir }}"
+        executable: /usr/bin/python3
+      register: locale_resync
+      changed_when: "'0 msgstr substitutions across 0 files' not in locale_resync.stdout"
+
+
+    # ─── Yarn install (drops symlinks, generates lockfile) ──────────
+    #
+    # `changed_when: 'Already up to date' not in stdout` was wrong:
+    # yarn doesn't print that string on no-op installs (it prints
+    # "Done in 0s 644ms" instead), so every run reported changed and
+    # services were unnecessarily restarted. Hash the lockfile + the
+    # workspace bookkeeping file (`.yarn/build-state.yml` if present)
+    # before and after, and gate `changed` on actual divergence.
+
+    - name: "deps: hash yarn lockfile before install"
+      ansible.builtin.stat:
+        path: "{{ mirror_dir }}/yarn.lock"
+        checksum_algorithm: sha256
+      register: yarn_lock_before
+
+    - name: "deps: yarn install in mirror"
+      ansible.builtin.command:
+        cmd: yarn install
+        chdir: "{{ mirror_dir }}"
+      register: yarn_install_cmd
+      retries: 3
+      delay: 15
+      until: yarn_install_cmd is succeeded
+      changed_when: false
+
+    - name: "deps: hash yarn lockfile after install"
+      ansible.builtin.stat:
+        path: "{{ mirror_dir }}/yarn.lock"
+        checksum_algorithm: sha256
+      register: yarn_lock_after
+
+    - name: "deps: derive yarn-install changed flag"
+      ansible.builtin.set_fact:
+        yarn_install:
+          changed: "{{ yarn_lock_before.stat.checksum | default('') != yarn_lock_after.stat.checksum | default('') }}"
+
+    # ─── @proton/colors themes/dist (gitignored upstream) ───────────
+
+    - name: "colors: check if themes/dist already generated"
+      ansible.builtin.stat:
+        path: "{{ mirror_dir }}/packages/colors/themes/dist"
+      register: colors_dist
+
+    # ADR 244: ship the Euroton custom theme source CSS into the
+    # mirror's themes/src/ before generation. These deliberately avoid
+    # Proton's #6d4aff primary, and they're copied AFTER the palette
+    # swap above, so the swap never touches them -- each keeps its own
+    # identity colour (Dracula purple, Nord frost, Gruvbox orange,
+    # Solarized blue).
+    - name: "colors: ship Euroton custom theme sources (ADR 244)"
+      ansible.builtin.copy:
+        src: files/euroton-themes/src/
+        dest: "{{ mirror_dir }}/packages/colors/themes/src/"
+        mode: "0644"
+      register: extra_theme_src
+
+    # ADR 180: upstream gen-themes.ts:101 calls fs.writeFileSync
+    # without ensuring its output directory exists. On a fresh
+    # clone the script crashes with ENOENT. Pre-create the directory
+    # so the generate step can write into it.
+    - name: "colors: ensure themes/dist exists before generate (ADR 180)"
+      ansible.builtin.file:
+        path: "{{ mirror_dir }}/packages/colors/themes/dist"
+        state: directory
+        mode: "0755"
+      when: not colors_dist.stat.exists
+
+    # New *.theme.css imports in themes.ts have to resolve against a dist
+    # that has the custom themes (ADR 244), or the build fails. It runs every time: a kept dist can be stale after
+    # an upgrade, or partial after a failed run, & generating is cheap.
+    - name: "colors: generate themes/dist"
+      ansible.builtin.command:
+        cmd: yarn workspace @proton/colors run generate
+        chdir: "{{ mirror_dir }}"
+      changed_when: false
+
+    # ─── euroton-server deps + migrations on boot ───────────────────
+    #
+    # Same lockfile-hash trick as yarn above. pnpm doesn't reliably
+    # print "Already up to date" on no-op installs either; we gate
+    # `changed` on whether `pnpm-lock.yaml` actually moved.
+
+    - name: "server: hash pnpm lockfile before install"
+      ansible.builtin.stat:
+        path: "{{ server_dir }}/pnpm-lock.yaml"
+        checksum_algorithm: sha256
+      register: pnpm_lock_before
+
+    - name: "server: pnpm install"
+      ansible.builtin.command:
+        cmd: pnpm install --frozen-lockfile
+        chdir: "{{ server_dir }}"
+      register: pnpm_install_cmd
+      retries: 3
+      delay: 15
+      until: pnpm_install_cmd is succeeded
+      changed_when: false
+
+    - name: "server: hash pnpm lockfile after install"
+      ansible.builtin.stat:
+        path: "{{ server_dir }}/pnpm-lock.yaml"
+        checksum_algorithm: sha256
+      register: pnpm_lock_after
+
+    - name: "server: derive pnpm-install changed flag"
+      ansible.builtin.set_fact:
+        pnpm_install:
+          changed: "{{ pnpm_lock_before.stat.checksum | default('') != pnpm_lock_after.stat.checksum | default('') }}"
+
+    # ─── godmode: deps + build (ADR 057) ───────────────────────────
+    #
+    # Only runs if godmode-dev is in `services`. Same lockfile-hash
+    # trick as pnpm above to gate `changed`. The build step writes
+    # `dist/` which `vite preview` serves at runtime; gated on either
+    # the lockfile moving (deps changed) OR a sha256 of the src/
+    # tree drifting (operator pushed new godmode code).
+
+    # ─── Per-instance SRP modulus keypair (ADR 004) ─────────────────
+    #
+    # The server generates the pair under data/ on first use and reuses it
+    # after that, so re-runs don't rotate it. The client gets the public half
+    # baked in; node_modules has to exist first, which is why this follows
+    # both installs.
+
+    - name: "srp: ensure instance keypair exists"
+      ansible.builtin.command:
+        cmd: >-
+          pnpm exec tsx -e "import('./src/modules/auth/modulusKey.ts').then((m) => m.getModulusKey()).then(() => process.exit(0))"
+        chdir: "{{ server_dir }}"
+        creates: "{{ server_dir }}/data/srp-modulus-key.pub.asc"
+      environment:
+        DATABASE_URL: "postgres://euroton:{{ db_password }}@localhost:54320/euroton"
+
+    - name: "srp: read instance pubkey"
+      ansible.builtin.slurp:
+        src: "{{ server_dir }}/data/srp-modulus-key.pub.asc"
+      register: srp_pubkey_file
+
+    - name: "srp: substitute pubkey into @protontech/crypto constants.ts"
+      ansible.builtin.replace:
+        path: "{{ mirror_dir }}/node_modules/@protontech/crypto/src/srp/constants.ts"
+        # Anchored on the variable name to match the whole string literal,
+        # BEGIN/END PGP block included.
+        regexp: "(SRP_MODULUS_KEY\\s*=\\s*`)[^`]*(`)"
+        replace: '\1{{ srp_pubkey_file.content | b64decode | trim }}\2'
+      register: srp_replace
+
+    - name: "godmode: hash lockfile before install"
+      ansible.builtin.stat:
+        path: "{{ godmode_dir }}/pnpm-lock.yaml"
+        checksum_algorithm: sha256
+      register: godmode_lock_before
+      when: pf_godmode.stat is defined and pf_godmode.stat.exists
+
+    - name: "godmode: pnpm install"
+      ansible.builtin.command:
+        cmd: pnpm install --frozen-lockfile
+        chdir: "{{ godmode_dir }}"
+      register: godmode_install_cmd
+      retries: 3
+      delay: 15
+      until: godmode_install_cmd is succeeded
+      changed_when: false
+      when: pf_godmode.stat is defined and pf_godmode.stat.exists
+
+    - name: "godmode: hash lockfile after install"
+      ansible.builtin.stat:
+        path: "{{ godmode_dir }}/pnpm-lock.yaml"
+        checksum_algorithm: sha256
+      register: godmode_lock_after
+      when: pf_godmode.stat is defined and pf_godmode.stat.exists
+
+    - name: "godmode: hash src tree (gates the build rerun)"
+      ansible.builtin.shell: |
+        cd "{{ godmode_dir }}"
+        find src index.html vite.config.ts tsconfig.json package.json \
+             -type f -print0 2>/dev/null \
+          | sort -z | xargs -0 sha256sum 2>/dev/null \
+          | sha256sum | awk '{print $1}'
+      register: godmode_src_hash
+      changed_when: false
+      when: pf_godmode.stat is defined and pf_godmode.stat.exists
+
+    - name: "godmode: read previous src hash (if any)"
+      ansible.builtin.slurp:
+        src: "{{ godmode_dir }}/.dist-src-hash"
+      register: godmode_prev_hash_b64
+      failed_when: false
+      changed_when: false
+      when: pf_godmode.stat is defined and pf_godmode.stat.exists
+
+    - name: "godmode: vite build (only if lockfile or src tree moved)"
+      ansible.builtin.command:
+        cmd: pnpm run build
+        chdir: "{{ godmode_dir }}"
+      register: godmode_build_cmd
+      when:
+        - pf_godmode.stat is defined and pf_godmode.stat.exists
+        - (godmode_lock_before.stat.checksum | default('') != godmode_lock_after.stat.checksum | default(''))
+          or
+          (godmode_src_hash.stdout != (godmode_prev_hash_b64.content | default('') | b64decode | trim))
+
+    - name: "godmode: record src hash to skip rebuild next run"
+      ansible.builtin.copy:
+        dest: "{{ godmode_dir }}/.dist-src-hash"
+        content: "{{ godmode_src_hash.stdout }}"
+        mode: "0644"
+      when:
+        - pf_godmode.stat is defined and pf_godmode.stat.exists
+        - godmode_build_cmd is defined and godmode_build_cmd.changed | default(false)
+
+    - name: "godmode: derive install/build changed flag"
+      ansible.builtin.set_fact:
+        godmode_changed: >-
+          {{ (pf_godmode.stat is defined and pf_godmode.stat.exists) and
+             ((godmode_lock_before.stat.checksum | default('') != godmode_lock_after.stat.checksum | default(''))
+              or (godmode_build_cmd is defined and godmode_build_cmd.changed | default(false))) }}
+
+    # ─── godmode operator env file (OPERATOR_TOKEN + OPERATOR_ORIGIN) ──
+    #
+    # Lives at /etc/euroton/server.env (mode 0640 root:root) and is
+    # referenced by `EnvironmentFile=-` in the euroton-server systemd
+    # unit. The `-` prefix makes it tolerant of the file being absent
+    # so the service still boots if the operator hasn't enabled godmode
+    # yet (operator_token: ""). Writing the file is gated on
+    # operator_token being set; when it changes, euroton-server has to
+    # be restarted (systemd doesn't watch EnvironmentFile content) —
+    # we feed `operator_env_changed` into services_any_changed below.
+
+    - name: "godmode: ensure /etc/euroton exists"
+      ansible.builtin.file:
+        path: /etc/euroton
+        state: directory
+        mode: "0755"
+
+    - name: "godmode: write /etc/euroton/server.env"
+      ansible.builtin.copy:
+        dest: /etc/euroton/server.env
+        content: |
+          # Managed by euroton-selfhost/ansible — do not edit by hand.
+          # Re-run the playbook after changing group_vars.
+          HOST=127.0.0.1
+          DATABASE_URL=postgres://euroton:{{ db_password }}@localhost:54320/euroton
+          OPERATOR_TOKEN={{ operator_token }}
+          OPERATOR_ORIGIN=https://godmode.{{ domain }}
+          LOCAL_MAIL_DOMAIN={{ mail_domain if (postfix_enabled | default(false)) else domain }}
+          ACCOUNT_APP_URL=https://account.{{ domain }}
+          TRUST_PROXY=127.0.0.1
+          CORS_ORIGINS=https://mail.{{ domain }},https://account.{{ domain }},https://calendar.{{ domain }},https://godmode.{{ domain }}
+          COOKIE_SECURE=true
+          BRAND_NAME={{ brand_name | default('Euroton') }}
+          {% if postfix_enabled | default(false) %}
+          # Mail edges (ADR 232). Inbound LMTP from Postfix + outbound
+          # dispatch back through it. mail_outbound_backend is the held-
+          # queue switch: 'none' records+drops, 'postfix' delivers.
+          MAIL_INBOUND_LMTP_ENABLED=true
+          MAIL_INBOUND_LMTP_HOST=127.0.0.1
+          MAIL_INBOUND_LMTP_PORT=24
+          MAIL_INBOUND_SPF_POLICY={{ mail_inbound_spf_policy | default('off') }}
+          MAIL_INBOUND_DKIM_POLICY={{ mail_inbound_dkim_policy | default('off') }}
+          MAIL_INBOUND_DMARC_ENFORCE={{ mail_inbound_dmarc_enforce | default('off') }}
+          MAIL_INBOUND_SPAM_BACKEND={{ mail_inbound_spam_backend | default('off') }}
+          MAIL_OUTBOUND_BACKEND={{ mail_outbound_backend | default('none') }}
+          MAIL_OUTBOUND_HOST=127.0.0.1
+          MAIL_OUTBOUND_PORT=25
+          MAIL_OUTBOUND_HELO={{ mail_hostname }}
+          MAIL_OUTBOUND_DKIM_ENABLED={{ mail_dkim_enabled | default(false) | string | lower }}
+          MAIL_OUTBOUND_DKIM_SELECTOR={{ mail_dkim_selector | default('') }}
+          MAIL_OUTBOUND_DKIM_DOMAIN={{ mail_dkim_domain | default(mail_domain) }}
+          MAIL_OUTBOUND_DKIM_PRIVATE_KEY_PATH={{ mail_dkim_private_key_path | default('') }}
+          MAIL_OUTBOUND_BOUNCE_INGEST_TOKEN={{ mail_bounce_ingest_token | default('') }}
+          MAIL_OUTBOUND_BOUNCE_VERP_ENABLED={{ (mail_bounce_ingest_token | default('') | length > 0) | string | lower }}
+          {% endif %}
+        owner: root
+        group: root
+        mode: "0640"
+      register: operator_env
+
+    - name: "godmode: derive operator-env changed flag"
+      ansible.builtin.set_fact:
+        operator_env_changed: >-
+          {{ operator_env.changed | default(false) }}
+
+    # ─── Postfix MTA + spamd + postgrey (ADR 232) ───────────────────
+    #
+    # euroton-server's SMTP edges (ADRs 129–140 + 231) speak SMTP to a
+    # local Postfix on 127.0.0.1:25 and expect inbound mail relayed back
+    # over LMTP on 127.0.0.1:24. This block installs + configures that
+    # MTA. No opendkim — DKIM is signed AND verified in-process by
+    # euroton-server. spamd runs because euroton-server's spamc client
+    # talks to it; postgrey is a Postfix policy service (greylisting has
+    # no server-side code). Entire block gated on `postfix_enabled`;
+    # default false leaves existing deploys (and CGNAT preprod, which
+    # can't receive real mail) untouched.
+
+    - name: "postfix: preseed debconf for non-interactive install"
+      ansible.builtin.debconf:
+        name: postfix
+        question: "{{ item.q }}"
+        vtype: "{{ item.t }}"
+        value: "{{ item.v }}"
+      loop:
+        - { q: "postfix/main_mailer_type", t: "select", v: "Internet Site" }
+        - { q: "postfix/mailname", t: "string", v: "{{ mail_hostname }}" }
+      loop_control:
+        label: "{{ item.q }}"
+      when: postfix_enabled | default(false)
+
+    - name: "postfix: install postfix + spamassassin + postgrey + curl"
+      ansible.builtin.apt:
+        name:
+          - postfix
+          - libsasl2-modules
+          - spamassassin
+          - postgrey
+          - curl
+        state: present
+        update_cache: true
+      when: postfix_enabled | default(false)
+
+    - name: "postfix: ensure /etc/euroton/dkim exists (operator drops key here)"
+      ansible.builtin.file:
+        path: /etc/euroton/dkim
+        state: directory
+        mode: "0750"
+      when: postfix_enabled | default(false)
+
+    - name: "postfix: install bounce-pipe script"
+      ansible.builtin.copy:
+        src: euroton-bounce-pipe
+        dest: /usr/local/lib/euroton/euroton-bounce-pipe
+        mode: "0755"
+      when: postfix_enabled | default(false)
+
+    - name: "postfix: write bounce-pipe env (ingest token + api base)"
+      ansible.builtin.copy:
+        dest: /etc/euroton/bounce-pipe.env
+        content: |
+          # Managed by euroton-selfhost/ansible — do not edit by hand.
+          # Read by the euroton-bounce pipe (runs as user=nobody, so this
+          # carries only the bounce-ingest capability, not OPERATOR_TOKEN).
+          EUROTON_API_BASE=https://127.0.0.1:4000
+          MAIL_OUTBOUND_BOUNCE_INGEST_TOKEN={{ mail_bounce_ingest_token | default('') }}
+        owner: root
+        group: root
+        mode: "0644"
+      when: postfix_enabled | default(false)
+
+    - name: "postfix: write relay credentials"
+      ansible.builtin.copy:
+        content: "{{ mail_relayhost }} {{ mail_relay_user }}:{{ mail_relay_password }}\n"
+        dest: /etc/postfix/sasl_passwd
+        mode: "0600"
+      no_log: true
+      register: postfix_sasl
+      when: (postfix_enabled | default(false)) and (mail_relayhost | default('') | length > 0)
+
+    - name: "postfix: index relay credentials"
+      ansible.builtin.command: postmap /etc/postfix/sasl_passwd
+      when: postfix_sasl is changed
+
+    - name: "postfix: render main.cf"
+      ansible.builtin.template:
+        src: templates/postfix-main.cf.j2
+        dest: /etc/postfix/main.cf
+        mode: "0644"
+      register: postfix_main_cf
+      when: postfix_enabled | default(false)
+
+    - name: "postfix: render transport map"
+      ansible.builtin.template:
+        src: templates/postfix-transport.j2
+        dest: /etc/postfix/transport
+        mode: "0644"
+      register: postfix_transport
+      when: postfix_enabled | default(false)
+
+    - name: "postfix: rebuild transport .db"
+      ansible.builtin.command:
+        cmd: postmap /etc/postfix/transport
+      when: postfix_enabled | default(false) and postfix_transport.changed | default(false)
+
+    - name: "postfix: register euroton-bounce pipe service in master.cf"
+      ansible.builtin.blockinfile:
+        path: /etc/postfix/master.cf
+        marker: "# {mark} EUROTON-BOUNCE (ADR 232)"
+        block: |
+          euroton-bounce unix - n n - - pipe
+            flags=Rq user=nobody argv=/usr/local/lib/euroton/euroton-bounce-pipe ${recipient}
+      register: postfix_master_cf
+      when: postfix_enabled | default(false)
+
+    - name: "postfix: enable + start spamd (euroton-server's spamc target)"
+      ansible.builtin.systemd:
+        name: spamd
+        enabled: true
+        state: started
+      when: postfix_enabled | default(false)
+
+    - name: "postfix: enable + start postgrey (greylisting policy service)"
+      ansible.builtin.systemd:
+        name: postgrey
+        enabled: true
+        state: started
+      when: postfix_enabled | default(false)
+
+    - name: "postfix: enable + reload/restart postfix"
+      ansible.builtin.systemd:
+        name: postfix
+        enabled: true
+        state: >-
+          {{ 'restarted'
+             if (postfix_main_cf.changed | default(false)
+                 or postfix_master_cf.changed | default(false)
+                 or postfix_transport.changed | default(false))
+             else 'started' }}
+      when: postfix_enabled | default(false)
+
+    # ─── Service lifecycle (systemd units) ──────────────────────────
+    #
+    # The three app services run as systemd units installed to
+    # /etc/systemd/system/. Boot autostart is `WantedBy=multi-user.target`
+    # — the LXC comes back from `systemctl reboot` with all three already
+    # up, no operator intervention needed.
+    #
+    # Re-running this playbook with no upstream changes should be a
+    # no-op on running services: bouncing them on every run interrupts
+    # active browser sessions and forces a ~30s webpack cold-compile
+    # for no reason. We restart services only when something upstream
+    # of them changed (patches, deps, SRP key, SSL leaf, or the unit
+    # file itself).
+
+    - name: "ensure log dir"
+      ansible.builtin.file:
+        path: /var/log/euroton
+        state: directory
+        mode: "0755"
+
+    - name: "services: compute whether anything that affects services changed"
+      ansible.builtin.set_fact:
+        services_any_changed: >-
+          {{ (favicon_svg_copy.results | default([]) | selectattr('changed') | list | length > 0)
+             or (palette_replace_lower.results | default([]) | selectattr('changed') | list | length > 0)
+             or (palette_replace_upper.results | default([]) | selectattr('changed') | list | length > 0)
+             or (palette_replace_rgb.results | default([]) | selectattr('changed') | list | length > 0)
+             or (palette_replace_8a6_lower.results | default([]) | selectattr('changed') | list | length > 0)
+             or (palette_replace_8a6_upper.results | default([]) | selectattr('changed') | list | length > 0)
+             or (palette_replace_413.results | default([]) | selectattr('changed') | list | length > 0)
+             or (brand_purple_sweep.results | default([]) | selectattr('changed') | list | length > 0)
+             or (storefront_neutralize.results | default([]) | selectattr('changed') | list | length > 0)
+             or (storefront_accents.results | default([]) | selectattr('changed') | list | length > 0)
+             or logo_inject.changed | default(false)
+             or extra_theme_src.changed | default(false)
+             or locale_resync.changed
+             or srp_replace.changed
+             or app_url_replace_mail.changed
+             or app_url_replace_account.changed
+             or app_url_replace_calendar.changed
+             or app_url_replace_pass.changed
+             or app_url_replace_vpn_settings.changed
+             or app_url_replace_wallet.changed
+             or status_page_url_replace.changed
+             or developer_name_replace.changed
+             or developer_url_replace.changed
+             or twitter_site_replace.changed
+             or yarn_install.changed or pnpm_install.changed
+             or ssl_key_copied.changed or ssl_crt_copied.changed
+             or godmode_changed | default(false)
+             or operator_env_changed | default(false) }}
+
+    # ─── Production SPA builds (ADR 245) ────────────────────────────
+    #
+    # Build each webpack app once to a static dist/ that Caddy serves
+    # with file_server. Built
+    # SERIALLY (loop default) — a Proton prod build peaks at multiple GB
+    # of heap; parallel builds would OOM the box. The API URL is baked
+    # at build time via --api (per-instance build). NODE_OPTIONS raises
+    # the old-space so minifying the larger apps (mail) doesn't OOM.
+    # Rebuild when the dist is missing OR anything upstream changed
+    # (services_any_changed) — same signal that restarts euroton-server.
+    - name: "build: check existing SPA dist"
+      ansible.builtin.stat:
+        path: "{{ mirror_dir }}/{{ item.dist }}/index.html"
+      loop: "{{ build_apps | default([]) }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: spa_dist_stat
+
+    # Append --appMode=sso to every build: it is harmless for the apps
+    # whose build:web already sets it, and it overrides vpn-settings'
+    # build:web (which hardcodes --appMode=standalone) so the whole
+    # deployment is consistent SSO. Later --appMode wins.
+    - name: "build: production SPA bundles (serial; ADR 245)"
+      ansible.builtin.command:
+        cmd: "yarn workspace {{ item.0.workspace }} build:web --api /api --appMode=sso"
+        chdir: "{{ mirror_dir }}"
+      environment:
+        NODE_OPTIONS: "--max-old-space-size=8192"
+        # proton-pack's build command has no --version flag; it derives the
+        # app version from CI_COMMIT_TAG (getVersionNumberFromTag strips the
+        # part up to '@'), else getGitTagVersion (no tag in the
+        # clone's history), else the 5.0.999.999 fallback. Set it so the footer +
+        # app-version header carry a real version. Mirrors the upstream 5.0
+        # line at the pinned sync; bump euroton_app_version on re-sync.
+        CI_COMMIT_TAG: "euroton@{{ euroton_app_version | default('5.0.0') }}"
+      loop: "{{ build_apps | default([]) | zip(spa_dist_stat.results) | list }}"
+      loop_control:
+        label: "{{ item.0.name }}"
+      when: services_any_changed or not item.1.stat.exists
+      register: spa_build
+      changed_when: spa_build is not skipped
+
+    # ADR 181: install the notify-when-ready helper. Type=notify dev-
+    # server units invoke this wrapper so they signal READY=1 only
+    # after their first webpack compile actually serves HTTP 200.
+    - name: "services: ensure /usr/local/lib/euroton exists (ADR 181)"
+      ansible.builtin.file:
+        path: /usr/local/lib/euroton
+        state: directory
+        mode: "0755"
+
+    - name: "services: install notify-when-ready helper (ADR 181)"
+      ansible.builtin.copy:
+        src: notify-when-ready
+        dest: /usr/local/lib/euroton/notify-when-ready
+        mode: "0755"
+
+    - name: "services: install systemd unit"
+      ansible.builtin.template:
+        src: templates/euroton-service.service.j2
+        dest: "/etc/systemd/system/{{ item.name }}.service"
+        mode: "0644"
+      loop: "{{ services }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: unit_files
+
+    - name: "services: daemon-reload when any unit changed"
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: >-
+        (unit_files.results | selectattr('changed') | list | length > 0)
+        or (dev_units_removed.results | default([]) | selectattr('changed') | list | length > 0)
+
+    # ADR 178: bring euroton-server up first (it's the fast one — no
+    # webpack first-compile), gate smoke tests on it, then serially
+    # warm each service (restart + wait for port). Starting them
+    # in parallel races for RAM and OOM-wedges
+    # the LXC (per-process first-compile is ~2-4 GB × 6 ≈ 12-24 GB
+    # against 15 GB RAM + 4 GB swap). Serial warm-up keeps the peak
+    # at one webpack first-compile at a time.
+    # An upgrade with an unchanged lockfile still has new code to load.
+    - name: "services: read euroton-server revision"
+      ansible.builtin.command:
+        cmd: git -C {{ server_dir }} rev-parse HEAD
+      register: server_rev
+      changed_when: false
+
+    - name: "services: read last started euroton-server revision"
+      ansible.builtin.command:
+        cmd: cat /etc/euroton/server.rev
+      register: server_rev_started
+      changed_when: false
+      failed_when: false
+
+    - name: "services: compute euroton-server restart need"
+      ansible.builtin.set_fact:
+        server_needs_restart: >-
+          {{ services_any_changed or
+             server_rev.stdout != server_rev_started.stdout or
+             (unit_files.results
+              | selectattr('item.name', 'eq', 'euroton-server')
+              | selectattr('changed')
+              | list | length > 0) }}
+
+    - name: "services: start euroton-server (ADR 178)"
+      ansible.builtin.systemd:
+        name: euroton-server
+        enabled: yes
+        state: "{{ 'restarted' if server_needs_restart else 'started' }}"
+
+    - name: "services: record started euroton-server revision"
+      ansible.builtin.copy:
+        content: "{{ server_rev.stdout }}"
+        dest: /etc/euroton/server.rev
+        mode: "0644"
+
+    # ─── Health + smoke gates ───────────────────────────────────────
+
+    - name: "services: wait for euroton-server /health"
+      ansible.builtin.uri:
+        url: "{{ euroton_api_url }}/health"
+        status_code: 200
+        validate_certs: false
+      register: health
+      retries: 20
+      delay: 3
+      until: health.status == 200
+
+    # ADR 033: the upstream client's very first call. If this 200s the
+    # bootstrap path is wired end-to-end (route registered, sessions
+    # table writable, server JSON-replies). Any 404 here means the
+    # routes file wasn't synced / the server didn't restart.
+    - name: "smoke: POST /auth/v4/sessions returns UID"
+      ansible.builtin.uri:
+        url: "{{ euroton_api_url }}/auth/v4/sessions"
+        method: POST
+        body_format: json
+        body: {}
+        status_code: 200
+        return_content: true
+        validate_certs: false
+      register: smoke_bootstrap
+      retries: 3
+      delay: 2
+      until: smoke_bootstrap.status == 200 and smoke_bootstrap.json.UID is defined
+
+    # ADR 033: Unleash feature-flag stub the client polls during
+    # bootstrap. Empty toggles list = all gates closed by default;
+    # the assertion is the *shape*, not the count.
+    - name: "smoke: GET /feature/v2/frontend returns toggles list"
+      ansible.builtin.uri:
+        url: "{{ euroton_api_url }}/feature/v2/frontend?sessionId=playbook&appName=mail&environment=default"
+        method: GET
+        status_code: 200
+        return_content: true
+        validate_certs: false
+      register: smoke_unleash
+      retries: 3
+      delay: 2
+      until: >-
+        smoke_unleash.status == 200
+        and smoke_unleash.json.Code == 1000
+        and smoke_unleash.json.toggles is iterable
+
+    # ADR 034: anti-bot challenge iframe. If this 404s, the mail UI's
+    # login form stalls after three jittered retries (15/20/25s) and
+    # the user sees a generic "Challenge error" with no diagnostic.
+    # Match a protocol marker in the body so a stray 200 (e.g. a SPA
+    # fallback to index.html) is caught as a regression.
+    - name: "smoke: GET /challenge/v4/html serves the iframe stub"
+      ansible.builtin.uri:
+        url: "{{ euroton_api_url }}/challenge/v4/html?Type=0&Name=unauth&Lang=&Dir=ltr"
+        method: GET
+        status_code: 200
+        return_content: true
+        validate_certs: false
+      register: smoke_challenge
+      retries: 3
+      delay: 2
+      until: >-
+        smoke_challenge.status == 200
+        and 'submit.broadcast' in (smoke_challenge.content | default(''))
+
+    # ADR 178: serial warm-up. Each iteration restarts the service,
+    # then blocks until its TCP port listens, so the next one doesn't
+    # contend for RAM. The per-port timeout is 600s.
+    #
+    # euroton-server already started before the smoke gates (above);
+    # this loop covers godmode. Order in the
+    # services list matters — earlier entries warm up first.
+    - name: "services: serially restart + warm services (ADR 178)"
+      ansible.builtin.include_tasks: tasks/restart-and-wait.yml
+      loop: "{{ services | zip(unit_files.results) | list }}"
+      loop_control:
+        label: "{{ item.0.name }}"
+      when: item.0.name != 'euroton-server'
+
+    # ─── Caddy reverse proxy on :443 ───────────────────────────────
+    #
+    # Routes browser-friendly hostnames to the right backend port so
+    # users don't need to type ports in URLs. Fastify keeps its
+    # HTTPS listener on 4000. Caddy
+    # connects to it with `tls_insecure_skip_verify` because the
+    # backend cert is our own self-signed leaf (verified by host
+    # placement, not chain). Direct-IP browsing to those ports stays
+    # working as a fallback.
+    #
+    # Caddy was installed early in the playbook (preflight section) so
+    # the `caddy` user/group exist by the time the SSL key is copied
+    # with `group: caddy mode: 0640`. Here we just configure + start
+    # it, after the backends have come up.
+
+    - name: "caddy: ensure /etc/caddy exists"
+      ansible.builtin.file:
+        path: /etc/caddy
+        state: directory
+        mode: "0755"
+
+    - name: "caddy: write Caddyfile from template"
+      ansible.builtin.template:
+        src: templates/Caddyfile.j2
+        dest: /etc/caddy/Caddyfile
+        mode: "0644"
+      register: caddy_config
+
+    - name: "caddy: enable + start (restart on config or key change)"
+      ansible.builtin.systemd:
+        name: caddy
+        enabled: yes
+        state: "{{ 'restarted' if (caddy_config.changed or ssl_key_copied.changed) else 'started' }}"
+        daemon_reload: true
+
+    - name: "caddy: wait for :443 to listen"
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 443
+        state: started
+        timeout: 30
+
+    # Caddy routes by SNI, not Host header. To smoke-test it on-box we
+    # need real hostname resolution: add `127.0.0.1 <site>` entries to
+    # the container's /etc/hosts so a curl/urllib client uses the
+    # right SNI when connecting locally. This also makes the
+    # hostnames usable from anything else running on the container
+    # (CLI signup, debugging tools).
+    - name: "caddy: loopback /etc/hosts entries for each site"
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        line: "127.0.0.1 {{ item.hostname }}"
+        regexp: "^127\\.0\\.0\\.1\\s+{{ item.hostname | regex_escape }}\\b"
+        state: present
+      loop: "{{ caddy_sites }}"
+      loop_control:
+        label: "{{ item.hostname }}"
+
+    # Webpack dev-servers stall the FIRST request through Caddy after
+    # a Caddy restart (HMR handshake quirk — subsequent requests are
+    # fine in <10ms). Settle pause + retry handles it cleanly.
+    - name: "caddy: settle after restart"
+      ansible.builtin.pause:
+        seconds: 3
+      when: caddy_config.changed or ssl_key_copied.changed
+
+    - name: "caddy: smoke test all configured hostnames"
+      ansible.builtin.command:
+        cmd: "curl -sk -o /dev/null -w '%{http_code}' --max-time 10 https://{{ item.hostname }}/"
+      register: caddy_smoke
+      changed_when: false
+      retries: 5
+      delay: 3
+      until: caddy_smoke.stdout in ['200', '301', '302', '401', '404']
+      loop: "{{ caddy_sites }}"
+      loop_control:
+        label: "{{ item.hostname }}"
+
+    - name: "summary"
+      ansible.builtin.debug:
+        msg:
+          - "euroton-server: {{ euroton_api_url }}/health -> 200"
+          - "smoke /auth/v4/sessions: 200 (UID={{ smoke_bootstrap.json.UID | default('?') | truncate(12) }})"
+          - "smoke /feature/v2/frontend: 200 (toggles count={{ smoke_unleash.json.toggles | default([]) | length }})"
+          - "smoke /challenge/v4/html: 200 + 'submit.broadcast' marker present"
+          - "euroton brand (ADR 170 palette + ADR 177 per-app glyph favicons): glyph_favicon={{ (favicon_svg_copy.results | default([]) | selectattr('changed') | list | length) }}/6 apps  palette_lower={{ (palette_replace_lower.results | default([]) | selectattr('changed') | list | length) }}/{{ theme_css_files.matched | default(0) }}  palette_upper={{ (palette_replace_upper.results | default([]) | selectattr('changed') | list | length) }}  palette_rgb={{ (palette_replace_rgb.results | default([]) | selectattr('changed') | list | length) }}"
+          - "logo overlay pipeline (ADR 175): changed={{ logo_inject.changed | default(false) }}  applied={{ (logo_inject.stdout | default('{}') | from_json).applied | default([]) | length }}  skipped={{ (logo_inject.stdout | default('{}') | from_json).skipped | default([]) | length }}"
+          - "srp pubkey substituted: {{ srp_replace.changed }}"
+          - "favicon URLs substituted: mail={{ app_url_replace_mail.changed }} ({{ app_url_mail }})  account={{ app_url_replace_account.changed }} ({{ app_url_account }})  calendar={{ app_url_replace_calendar.changed }} ({{ app_url_calendar }})  pass={{ app_url_replace_pass.changed }} ({{ app_url_pass }})  vpn-settings={{ app_url_replace_vpn_settings.changed }} ({{ app_url_vpn_settings }})  wallet={{ app_url_replace_wallet.changed }} ({{ app_url_wallet }})"
+          - "status page URL substituted: {{ status_page_url_replace.changed }} ({{ status_page_url }})"
+          - "PWA developer metadata substituted: name={{ developer_name_replace.changed }} ({{ developer_name }})  url={{ developer_url_replace.changed }} ({{ developer_url }})"
+          - "twitter:site substituted: {{ twitter_site_replace.changed }} ({{ twitter_site }})"
+          - "locale brand-resync: {{ locale_resync.stdout | default('not run') }}"
+          - "ssl cert: leaf_probe.rc={{ leaf_probe.rc }} (0 = still valid; nonzero = regenerated)  key_copied={{ ssl_key_copied.changed }}  crt_copied={{ ssl_crt_copied.changed }}"
+          - "services_any_changed: {{ services_any_changed }} (units restarted only if true OR a unit file changed)"
+          - "systemd units: {{ services | map(attribute='name') | list | join(', ') }} (journalctl -fu <name> to tail; systemctl restart <name>)"
+          - "URLs (via Caddy :443, add to /etc/hosts → {{ ansible_host }}): {{ caddy_sites | map(attribute='hostname') | map('regex_replace', '^(.*)$', 'https://\\1/') | list | join(', ') }}"
+          - "caddy: config changed={{ caddy_config.changed }}  service running on :443"
+          - "godmode: enabled={{ (operator_token | default('') | length > 0) and (pf_godmode.stat is defined and pf_godmode.stat.exists) }}  build_changed={{ godmode_changed | default(false) }}  env_changed={{ operator_env_changed | default(false) }}"
+          - "CA cert for browser trust-store: scp {{ ansible_user }}@{{ ansible_host }}:/etc/euroton/ssl/euroton-ca.crt ."
+          - "operator token for godmode: files/secrets/operator_token on this machine"

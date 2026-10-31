@@ -1,0 +1,79 @@
+/*
+ * Theme: Dracula
+ */
+:root,
+.ui-standard {
+    --primary: #bd93f9;
+
+    --signal-danger: #ff5555;
+
+    --signal-warning: #ffb86c;
+
+    --signal-success: #50fa7b;
+
+    --signal-info: #8be9fd;
+
+    --interaction-norm: #bd93f9;
+
+    --interaction-weak: #44475a;
+
+    --text-norm: #f8f8f2;
+    --text-weak: #b9bfd9;
+    --text-hint: #6272a4;
+    --text-disabled: #4a4d63;
+    --text-invert: #282a36;
+
+    --field-norm: #44475a;
+    --field-hover: #6272a4;
+    --field-disabled: #383a4d;
+
+    --focus-outline: #bd93f9;
+    --focus-ring: rgb(189 147 249 / 0.3);
+
+    --border-norm: #44475a;
+    --border-weak: #343746;
+
+    --background-norm: #282a36;
+    --background-weak: #2f3142;
+    --background-strong: #383a4d;
+    --background-invert: #f8f8f2;
+
+    --interaction-default: transparent;
+    --interaction-default-hover: rgb(68 71 90 / 0.5);
+    --interaction-default-active: rgb(68 71 90 / 0.7);
+
+    --shadow-norm-opacity: 0.5;
+    --shadow-raised-opacity: 0.44;
+    --shadow-lifted-opacity: 0.75;
+
+    --backdrop-norm: rgb(40 42 54 / 0.48);
+
+    /* Optional colors */
+
+    --optional-scrollbar-thumb-color: #44475a;
+
+    --optional-link-norm: var(--interaction-norm-major-1);
+    --optional-link-hover: var(--interaction-norm-major-2);
+    --optional-link-active: var(--interaction-norm-major-3);
+
+    --optional-navigation-current-item-text-color: var(--signal-success);
+    --optional-navigation-item-count-background-color: #bd93f9;
+
+    --optional-background-elevated: #2d2f3d;
+    --optional-background-lowered: #21222c;
+
+    --optional-email-item-read-text-color: var(--text-weak);
+
+    --optional-logo-text-proton-color: #f8f8f2;
+    --optional-logo-text-product-color: #f8f8f2;
+
+    --optional-promotion-text-color: #f8f8f2;
+    --optional-promotion-text-weak: #d6c3ff;
+    --optional-promotion-interaction-hover: rgb(189 147 249 / 0.2);
+    --optional-promotion-background-start: rgb(189 147 249 / 0.3);
+    --optional-promotion-background-end: rgb(255 121 198 / 0.1);
+    --optional-promotion-secondary-color: #ff79c6;
+
+    --optional-bg-promotion-bw-button: var(--background-invert);
+    --optional-text-promotion-bw-button: var(--text-invert);
+}

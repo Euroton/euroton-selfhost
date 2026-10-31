@@ -1,0 +1,12 @@
+Euroton selfhost
+
+The Euroton web clients are a modified fork of ProtonMail/WebClients
+(https://github.com/ProtonMail/WebClients), GPL-3.0, by Proton AG.
+Fork source: https://github.com/Euroton/WebClients, branch euroton.
+Base commit on the fork's main: 125ee4d3522895298fcf09c013df62c056c76b0a.
+That commit matches upstream 23b362f90764edad6c6e28cf740c133cb02eb764 of
+2026-05-29, minus 4 deleted documentation files.
+
+Euroton isn't affiliated with or endorsed by Proton AG. "Proton" & related
+marks belong to Proton AG. The Euroton logos are original artwork, with text
+outlined from DejaVu Sans Bold (Bitstream Vera licence).

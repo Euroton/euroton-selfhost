@@ -1,0 +1,6 @@
+# Copy to inventory.yml (gitignored). One host = one Euroton instance.
+all:
+  hosts:
+    euroton:
+      ansible_host: 192.0.2.10
+      ansible_user: root

@@ -1,0 +1,89 @@
+# Managed by euroton-selfhost/ansible — do not edit by hand.
+# Rendered from templates/euroton-service.service.j2 per entry in the
+# `services` list in group_vars/all.yml. Re-run the playbook to apply.
+#
+# ADR 181 added a `warmup_strategy` field per service:
+#   - simple  (default) — Type=simple + Restart=always. Used for
+#                         euroton-server (fast Fastify boot) and
+#                         godmode-dev (vite preview of pre-built dist).
+#   - notify  — Type=notify + a small wrapper that signals systemd
+#               READY=1 only after the underlying HTTP probe returns
+#               200/301/302. Used for webpack-dev-servers whose port
+#               binds before first-compile finishes — without this
+#               systemd reports the unit active too early and any
+#               `After=`/`Wants=` chain falls back to parallel.
+#
+# `boot_chain_after: <prev-service>` (optional) lets dev-servers
+# sequence at boot via systemd ordering, mirroring the playbook's
+# serial warm-up loop. Use `Wants=`, not `Requires=`: one broken
+# dev-server failing first-compile shouldn't tear the rest down.
+
+[Unit]
+Description=euroton {{ item.name }}
+After=network-online.target
+{% if item.name == 'euroton-server' %}
+Wants=network-online.target
+{% else %}
+After=euroton-server.service
+Requires=euroton-server.service
+{% if item.boot_chain_after is defined and item.boot_chain_after %}
+After={{ item.boot_chain_after }}.service
+Wants={{ item.boot_chain_after }}.service
+{% endif %}
+{% endif %}
+
+[Service]
+{% if item.warmup_strategy | default('simple') == 'notify' %}
+# ADR 181: webpack-dev-server first-compile is the hard part. Wrap
+# ExecStart with notify-when-ready so the unit only goes active after
+# the bundle actually serves a real HTTP response. Boot-time
+# `After=`/`Wants=` chains and `ansible.builtin.systemd state=restarted`
+# both gate on this signal.
+Type=notify
+NotifyAccess=all
+TimeoutStartSec={{ item.warmup_timeout | default(600) }}
+# Restart=on-failure (not always) + a bounded retry budget so a broken
+# first-compile doesn't loop-retry and re-thrash the LXC. Three burst
+# attempts in a 5-minute window then systemd gives up; operator fixes
+# the underlying bug and retries.
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=3
+{% else %}
+Type=simple
+Restart=always
+RestartSec=3
+{% endif %}
+WorkingDirectory={{ item.cwd }}
+{# Optional per-service env file (e.g. /etc/euroton/server.env carries
+   OPERATOR_TOKEN + OPERATOR_ORIGIN for the admin RPC surface). Use the
+   `-` prefix so a missing file is non-fatal — the service still starts
+   if the operator hasn't created it yet, with the relevant env unset. #}
+{% if item.env_file is defined and item.env_file %}
+EnvironmentFile=-{{ item.env_file }}
+{% endif %}
+{% if item.warmup_strategy | default('simple') == 'notify' %}
+# notify-when-ready forks the workload, polls warmup_url with a
+# bounded per-poll timeout, and calls `systemd-notify --ready` on
+# the first 200/301/302. NotifyAccess=all permits the wrapper child
+# to send the notify message. The leading `exec` replaces the bash
+# shell so the wrapper becomes the unit's MainPID.
+ExecStart=/bin/bash -lc 'exec /usr/local/lib/euroton/notify-when-ready {{ item.warmup_url | quote }} {{ item.warmup_timeout | default(600) }} {{ item.cmd }}'
+{% else %}
+# bash -lc loads the login PATH so node/pnpm/yarn resolve regardless of
+# install method (corepack, apt-node, nvm). The preflight `which` task
+# in playbook.yml confirms these resolve on the target before we get here.
+ExecStart=/bin/bash -lc {{ item.cmd | quote }}
+{% endif %}
+StandardOutput=append:{{ item.log }}
+StandardError=append:{{ item.log }}
+User=root
+Group=root
+# Don't kill grandchildren too aggressively — webpack-dev-server spawns
+# helper processes that need a moment to flush HMR state on SIGTERM.
+KillMode=mixed
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

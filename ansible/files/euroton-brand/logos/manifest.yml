@@ -1,0 +1,189 @@
+# Logo manifest — per-product / per-variant geometry + surfaces.
+#
+# Operators dropping overlay SVGs at
+# `logos/overlay/<product>/<variant>.svg` must hit the viewBox here
+# or the deploy-time validation rejects the SVG. Width/height in
+# the overlay <svg> can scale via the viewBox; what matters is the
+# coordinate system upstream coded its paths into.
+#
+# Surface column documents where the variant renders in the SPA so
+# the operator knows what they're swapping. Wordmark-only variants
+# back the login screen + standalone marketing surfaces; glyph-only
+# backs sidebar + tab icons; with-wordmark backs the app-switcher
+# drawer + login title.
+#
+# Master `proton` covers the cross-app `<ProtonLogo/>` calls
+# (account top-left, login header, etc.); per-product entries cover
+# `<MailLogo/>` / `<CalendarLogo/>` / etc. callsites.
+
+products:
+  mail:
+    tsx: packages/components/components/logo/MailLogo.tsx
+    height: 36
+    variants:
+      glyph:
+        tsx_variant: glyph-only
+        viewBox: "0 0 36 36"
+        width: 36
+        surfaces:
+          - mail sidebar collapsed
+          - browser tab favicon fallback
+      full:
+        tsx_variant: with-wordmark
+        viewBox: "0 0 134 36"
+        width: 134
+        surfaces:
+          - cross-app drawer "Mail" row
+          - login header on /mail
+      wordmark:
+        tsx_variant: wordmark-only
+        viewBox: "0 0 256 36"
+        width: 256
+        surfaces:
+          - standalone marketing / login title
+
+  calendar:
+    tsx: packages/components/components/logo/CalendarLogo.tsx
+    height: 36
+    variants:
+      glyph:
+        tsx_variant: glyph-only
+        viewBox: "0 0 36 36"
+        width: 36
+        surfaces:
+          - calendar sidebar collapsed
+      full:
+        tsx_variant: with-wordmark
+        viewBox: "0 0 178 36"
+        width: 178
+        surfaces:
+          - cross-app drawer "Calendar" row
+          - login header on /calendar
+      wordmark:
+        tsx_variant: wordmark-only
+        viewBox: "0 0 334 36"
+        width: 334
+        surfaces:
+          - standalone marketing surface
+
+  pass:
+    tsx: packages/components/components/logo/PassLogo.tsx
+    height: 36
+    variants:
+      glyph:
+        tsx_variant: glyph-only
+        viewBox: "0 0 36 36"
+        width: 36
+        surfaces:
+          - pass sidebar collapsed
+      full:
+        tsx_variant: with-wordmark
+        viewBox: "0 0 142 36"
+        width: 142
+        surfaces:
+          - cross-app drawer "Pass" row
+          - login header on /pass
+      wordmark:
+        tsx_variant: wordmark-only
+        viewBox: "0 0 260 36"
+        width: 260
+        surfaces:
+          - standalone marketing surface
+
+  drive:
+    tsx: packages/components/components/logo/DriveLogo.tsx
+    height: 36
+    variants:
+      glyph:
+        tsx_variant: glyph-only
+        viewBox: "0 0 36 36"
+        width: 36
+        surfaces:
+          - drive sidebar collapsed (not yet deployed)
+      full:
+        tsx_variant: with-wordmark
+        viewBox: "0 0 140 36"
+        width: 140
+        surfaces:
+          - cross-app drawer "Drive" row (when re-enabled)
+      wordmark:
+        tsx_variant: wordmark-only
+        viewBox: "0 0 246 36"
+        width: 246
+        surfaces:
+          - standalone marketing surface
+
+  vpn:
+    tsx: packages/components/components/logo/VpnLogo.tsx
+    height: 36
+    variants:
+      glyph:
+        tsx_variant: glyph-only
+        viewBox: "0 0 36 36"
+        width: 36
+        surfaces:
+          - VPN settings sidebar
+      full:
+        tsx_variant: with-wordmark
+        viewBox: "0 0 138 36"
+        width: 138
+        surfaces:
+          - cross-app drawer "VPN" row
+          - login header on /vpn
+      wordmark:
+        tsx_variant: wordmark-only
+        viewBox: "0 0 233 36"
+        width: 233
+        surfaces:
+          - standalone marketing surface
+
+  wallet:
+    tsx: packages/components/components/logo/WalletLogo.tsx
+    height: 36
+    variants:
+      glyph:
+        tsx_variant: glyph-only
+        viewBox: "0 0 36 36"
+        width: 36
+        surfaces:
+          - wallet sidebar collapsed
+      full:
+        tsx_variant: with-wordmark
+        viewBox: "0 0 154 36"
+        width: 154
+        surfaces:
+          - cross-app drawer "Wallet" row (when not hidden via ADR 127)
+          - login header on /wallet
+      wordmark:
+        tsx_variant: wordmark-only
+        viewBox: "0 0 292 36"
+        width: 292
+        surfaces:
+          - standalone marketing surface
+
+  proton:
+    tsx: packages/components/components/logo/ProtonLogo.tsx
+    height: 36
+    # ADR 184: ProtonLogo.tsx uses an `if (variant === 'with-
+    # wordmark') { … } return (<LogoBase>…</LogoBase>);` shape, not
+    # the `{variant === 'X' && (<>…</>)}` shape the other 6 product
+    # logos share. `tsx_template: if-else` switches inject-logos.py
+    # to a matching pattern. No `wordmark-only` variant in this
+    # shape; substitution covers `with-wordmark` (the if branch)
+    # and `glyph-only` (the fall-through return).
+    tsx_template: if-else
+    variants:
+      glyph:
+        tsx_variant: glyph-only
+        viewBox: "0 0 36 36"
+        width: 36
+        surfaces:
+          - account top-left brand mark
+          - login header (cross-product)
+      full:
+        tsx_variant: with-wordmark
+        viewBox: "0 0 96 36"
+        width: 96
+        surfaces:
+          - login header full mark
+          - settings → about

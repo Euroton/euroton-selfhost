@@ -1,0 +1,80 @@
+# Managed by euroton-selfhost/ansible — do not edit by hand. ADR 232.
+# Rendered from templates/postfix-main.cf.j2. Re-run the playbook to
+# apply. Postfix here is a dumb relay in both directions: euroton-server
+# owns recipient validation, storage, DKIM signing + verification, SPF /
+# DMARC / spam decisions. Postfix just moves bytes on/off the wire.
+
+compatibility_level = 3.6
+smtpd_banner = $myhostname ESMTP
+biff = no
+append_dot_mydomain = no
+
+myhostname = {{ mail_hostname }}
+mydomain = {{ mail_domain }}
+myorigin = $mydomain
+
+# Listen on every interface: loopback for euroton-server's outbound
+# submission, the public interface for inbound :25 from the internet.
+# (Inbound delivery is implemented — ADRs 134–140 — and now wired.)
+inet_interfaces = all
+inet_protocols = all
+
+# Final destination only for this host's own name. User mailboxes are
+# virtual and handed to euroton-server over LMTP; disable local(8)
+# delivery so Postfix never tries to write a Unix mailbox.
+mydestination = $myhostname, localhost
+local_recipient_maps =
+local_transport = error:local delivery disabled
+
+# Inbound: every recipient in our mail domain is relayed to the
+# euroton-server LMTP listener on loopback:24. euroton-server's RCPT TO
+# hook validates the address (unknown → 550) and its delivery pipeline
+# MIME-parses, encrypts to the recipient's key, and persists the row.
+virtual_mailbox_domains = {{ mail_domain }}
+virtual_transport = lmtp:127.0.0.1:24
+
+# Relay the originating client's IP (and name/helo) to euroton-server so
+# the inbound SPF/DMARC checks evaluate the real sender instead of
+# Postfix's loopback address. Pairs with the LMTP XFORWARD handler in
+# euroton-server (ADR 231).
+lmtp_send_xforward_command = yes
+
+# Plus-addressing: user+tag@domain. euroton-server resolves the tag
+# (MAIL_INBOUND_RECIPIENT_DELIMITER defaults to '+', matched here).
+recipient_delimiter = +
+
+# Bounces/DSNs for our VERP envelope (bounces+<id>@<domain>, ADR 133)
+# are routed to the euroton-bounce pipe transport instead of the LMTP
+# virtual transport. transport_maps overrides virtual_transport for the
+# matching recipient; recipient_delimiter means the `bounces` base
+# localpart matches `bounces+<anything>`.
+transport_maps = hash:/etc/postfix/transport
+
+# Trust only loopback (euroton-server's outbound submission). Loopback
+# is allowed to relay anywhere; everyone else may only deliver to our
+# own virtual domain (no open relay).
+mynetworks = 127.0.0.0/8 [::1]/128
+smtpd_recipient_restrictions =
+    permit_mynetworks,
+    reject_unauth_destination,
+    check_policy_service inet:127.0.0.1:10023
+
+# Opportunistic STARTTLS both directions. Operator points these at real
+# certificates; the Debian snakeoil pair is the fallback so STARTTLS is
+# still offered out of the box.
+smtpd_tls_security_level = may
+smtpd_tls_cert_file = {{ mail_tls_cert | default('/etc/ssl/certs/ssl-cert-snakeoil.pem') }}
+smtpd_tls_key_file = {{ mail_tls_key | default('/etc/ssl/private/ssl-cert-snakeoil.key') }}
+{% if mail_relayhost | default('') %}
+# Send everything through the operator's provider, with a login, over TLS.
+relayhost = {{ mail_relayhost }}
+smtp_sasl_auth_enable = yes
+smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd
+smtp_sasl_security_options = noanonymous
+smtp_tls_security_level = encrypt
+{% else %}
+smtp_tls_security_level = may
+{% endif %}
+tls_server_sni_maps =
+
+message_size_limit = {{ mail_message_size_limit | default(52428800) }}

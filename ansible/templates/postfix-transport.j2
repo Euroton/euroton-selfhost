@@ -1,0 +1,11 @@
+# Managed by euroton-selfhost/ansible — do not edit by hand. ADR 232.
+# Postfix transport map. The playbook runs `postmap` on this file to
+# build the hashed .db Postfix reads (referenced as transport_maps in
+# main.cf).
+#
+# Bounce DSNs land at bounces+<deliveryId>@<domain> (the VERP envelope
+# from ADR 133). Route the `bounces` base localpart to the euroton-bounce
+# pipe service (master.cf), which extracts the id and POSTs the DSN to
+# euroton-server's ingest endpoint. recipient_delimiter='+' means this
+# entry matches bounces+<anything>@<domain>.
+bounces@{{ mail_domain }}    euroton-bounce:

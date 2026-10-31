@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# notify-when-ready — wrap a command + signal systemd READY=1 when an
+# HTTP probe URL returns 2xx/3xx, then wait on the child.
+#
+# Designed for webpack-dev-server units (ADR 181). WDS binds its port
+# at listen() time, before its first compile resolves; requests during
+# compile are held open until the bundle lands. A naive Type=simple
+# unit reports "active" as soon as ExecStart fires — making the
+# downstream systemd `After=` chain useless for staging boot autostart.
+#
+# This wrapper:
+#   1. Starts the workload in its own process group (so SIGTERM
+#      cleanups don't leak grandchildren).
+#   2. Polls URL with bounded per-attempt timeout (so WDS holding a
+#      connection during compile doesn't burn the whole budget in
+#      one curl).
+#   3. On first 200/301/302, calls `systemd-notify --ready` so
+#      systemd flips the unit to active.
+#   4. Waits on the child; propagates exit code.
+#
+# Times out via READY_TIMEOUT_SECONDS and reaps the child on
+# timeout, returning non-zero so systemd retries via Restart=on-failure.
+#
+# Usage:
+#   notify-when-ready <probe-url> <ready-timeout-seconds> <cmd> [args...]
+#
+# Examples:
+#   notify-when-ready https://127.0.0.1:8080/index.html 600 \
+#       yarn workspace proton-mail start --api ... --port 8080
+
+set -u
+
+URL="${1:?URL required}"
+READY_TIMEOUT="${2:?ready timeout required (seconds)}"
+shift 2
+
+if [[ "$#" -lt 1 ]]; then
+    echo "notify-when-ready: missing command" >&2
+    exit 2
+fi
+
+# setsid puts the child in its own process group so we can SIGTERM the
+# whole group on timeout without forking pid sniffing.
+setsid "$@" &
+CHILD=$!
+
+# Forward signals to the child group.
+_term() {
+    kill -TERM -- "-$CHILD" 2>/dev/null || true
+    wait "$CHILD" 2>/dev/null
+    exit "$?"
+}
+trap _term SIGTERM SIGINT SIGHUP
+
+DEADLINE=$(( $(date +%s) + READY_TIMEOUT ))
+
+while [[ $(date +%s) -lt $DEADLINE ]]; do
+    # Bounded per-poll timeout: WDS holds during compile, but each
+    # attempt should give up after 8s so the loop keeps cycling. The
+    # next attempt will queue against the live WDS.
+    STATUS="$(curl -k -sS -o /dev/null -w '%{http_code}' \
+        --max-time 8 "$URL" 2>/dev/null || true)"
+
+    case "$STATUS" in
+        200|301|302)
+            systemd-notify --ready
+            # READY=1 sent; now wait on the workload like a normal unit.
+            wait "$CHILD"
+            exit "$?"
+            ;;
+    esac
+
+    # If the workload died before becoming ready, propagate that.
+    if ! kill -0 "$CHILD" 2>/dev/null; then
+        wait "$CHILD"
+        exit "$?"
+    fi
+
+    sleep 2
+done
+
+# Hit the ready-timeout. Reap the child group + report failure so
+# systemd's Restart=on-failure can decide what to do (with
+# StartLimitBurst capped to avoid retry storms).
+kill -TERM -- "-$CHILD" 2>/dev/null || true
+sleep 3
+kill -KILL -- "-$CHILD" 2>/dev/null || true
+wait "$CHILD" 2>/dev/null
+exit 1
