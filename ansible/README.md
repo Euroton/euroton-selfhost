@@ -61,6 +61,5 @@ Off by default & untested. `postfix_enabled: true` installs Postfix, spamd & pos
 
 ## Known limits
 
-- Services run as root. Dropping privileges needs a dedicated user with the right log & key permissions.
 - The playbook manages no firewall. Only ports 22 & 443 listen on public interfaces after an install, and 5355 if `systemd-resolved` has LLMNR on.
 - Pass, VPN & Wallet aren't built, because they 404-loop on most actions. Drive needs a private upstream package.

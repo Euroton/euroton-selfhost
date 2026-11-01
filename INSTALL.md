@@ -74,7 +74,7 @@ Restart the browser. Clicking through the warning instead breaks sign-up, becaus
 
 Open `https://godmode.euroton.internal`. It asks for the token in `files/secrets/operator_token` on the control machine. Caddy answers 403 to any address outside private ranges.
 
-That token is root on the database: the SQL console can run shell commands inside the Postgres container through `COPY ... PROGRAM`. Don't widen `operator_allowed` to the internet.
+That token reads & changes every table, including password verifiers & sessions, through the SQL console. The console runs as a role with no superuser rights, so `COPY ... PROGRAM` is refused, but the token is still everything an attacker needs. Don't widen `operator_allowed` to the internet.
 
 ## After the install
 

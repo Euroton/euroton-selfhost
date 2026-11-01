@@ -281,6 +281,18 @@
         state: directory
         mode: "0755"
 
+    # Services run as this user. It joins the caddy group to read the TLS key,
+    # & the binaries are called directly because corepack's pnpm cache is root's.
+    - name: "services: ensure service user"
+      ansible.builtin.user:
+        name: euroton
+        system: true
+        home: /var/lib/euroton
+        create_home: true
+        shell: /usr/sbin/nologin
+        groups: caddy
+        append: true
+
     - name: "ssl: copy leaf private key to target (caddy group readable)"
       ansible.builtin.copy:
         src: "{{ playbook_dir }}/files/ssl/euroton.key"
@@ -1020,6 +1032,8 @@
     - name: "postfix: ensure /etc/euroton/dkim exists (operator drops key here)"
       ansible.builtin.file:
         path: /etc/euroton/dkim
+        owner: root
+        group: euroton
         state: directory
         mode: "0750"
       when: postfix_enabled | default(false)
@@ -1133,7 +1147,20 @@
       ansible.builtin.file:
         path: /var/log/euroton
         state: directory
-        mode: "0755"
+        owner: euroton
+        group: euroton
+        recurse: true
+
+    - name: "services: hand the service user its writable paths"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: euroton
+        group: euroton
+        recurse: true
+      loop:
+        - "{{ server_dir }}/data"
+        - "{{ godmode_dir }}/node_modules/.vite-temp"
 
     - name: "services: compute whether anything that affects services changed"
       ansible.builtin.set_fact:
@@ -1262,11 +1289,21 @@
       changed_when: false
       failed_when: false
 
+    # A run that failed after writing the unit leaves the old process up, & the
+    # next run sees no change to the unit.
+    - name: "services: read which user euroton-server runs as"
+      ansible.builtin.shell:
+        cmd: ps -o user= -p "$(systemctl show -p MainPID --value euroton-server)"
+      register: server_running_user
+      changed_when: false
+      failed_when: false
+
     - name: "services: compute euroton-server restart need"
       ansible.builtin.set_fact:
         server_needs_restart: >-
           {{ services_any_changed or
              server_rev.stdout != server_rev_started.stdout or
+             (server_running_user.stdout | trim) == 'root' or
              (unit_files.results
               | selectattr('item.name', 'eq', 'euroton-server')
               | selectattr('changed')

@@ -205,7 +205,7 @@ app_mode: sso
 services:
   - name: euroton-server
     cwd: "{{ server_dir }}"
-    cmd: "env HTTPS_KEY_PATH=/etc/euroton/ssl/euroton.key HTTPS_CERT_PATH=/etc/euroton/ssl/euroton.crt pnpm exec tsx src/index.ts"
+    cmd: "env HTTPS_KEY_PATH=/etc/euroton/ssl/euroton.key HTTPS_CERT_PATH=/etc/euroton/ssl/euroton.crt node_modules/.bin/tsx src/index.ts"
     log: /var/log/euroton/server.log
     # OPERATOR_TOKEN + OPERATOR_ORIGIN for the godmode admin
     # surface (ADR 057). The playbook writes this file from
@@ -227,7 +227,7 @@ services:
   # disable godmode without further changes.
   - name: godmode-dev
     cwd: "{{ godmode_dir }}"
-    cmd: "pnpm exec vite preview --host 127.0.0.1 --port 8090 --strictPort"
+    cmd: "node_modules/.bin/vite preview --host 127.0.0.1 --port 8090 --strictPort"
     log: /var/log/euroton/godmode-dev.log
     port: 8090
     # godmode-dev is plain HTTP (per caddy_sites backend_scheme: http);

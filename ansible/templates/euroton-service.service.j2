@@ -78,8 +78,13 @@ ExecStart=/bin/bash -lc {{ item.cmd | quote }}
 {% endif %}
 StandardOutput=append:{{ item.log }}
 StandardError=append:{{ item.log }}
-User=root
-Group=root
+User=euroton
+Group=euroton
+Environment=HOME=/var/lib/euroton
+{% if item.name == 'euroton-server' and (postfix_enabled | default(false)) %}
+# Inbound LMTP listens on port 24.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+{% endif %}
 # Don't kill grandchildren too aggressively — webpack-dev-server spawns
 # helper processes that need a moment to flush HMR state on SIGTERM.
 KillMode=mixed

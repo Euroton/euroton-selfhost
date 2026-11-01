@@ -2,7 +2,7 @@
 
 ## Status: alpha
 
-This is the first version. The server's suite passes 1,436 checks & a clean install has been rehearsed on Debian 13, but no server has moved mail to or from the internet yet, & no database has been carried across a real version upgrade. Keep backups, & don't make this your only copy of mail you can't lose.
+This is the first version. The server's suite passes 1,464 checks & a clean install has been rehearsed on Debian 13, but no server has moved mail to or from the internet yet, & no database has been carried across a real version upgrade. Keep backups, & don't make this your only copy of mail you can't lose.
 
 These have to happen before it's called beta: a week of live mail through Postfix in both directions, an upgrade tested with real data, a tested restore from backup, services that don't run as root & the rest of the audit in [SECURITY.md](SECURITY.md). Godmode also still runs on a Vite dev server.
 

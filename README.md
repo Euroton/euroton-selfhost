@@ -12,7 +12,7 @@ TLS is self-signed unless you bring your own certificates. Your browser needs th
 
 Help, legal & some upgrade links in the clients still point to `proton.me`, inherited from upstream: 13 distinct URLs in the Mail & Calendar builds, 61 in Account. Those pages describe Proton's service, not your server.
 
-The services run as root. That's a known limit & fixing it needs a dedicated user with the right log & key permissions.
+The server & Godmode run as the `euroton` system user, which can write only `data/` & its logs.
 
 ## Licence
 
