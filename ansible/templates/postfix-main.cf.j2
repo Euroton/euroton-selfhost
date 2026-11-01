@@ -30,7 +30,7 @@ local_transport = error:local delivery disabled
 # euroton-server LMTP listener on loopback:24. euroton-server's RCPT TO
 # hook validates the address (unknown → 550) and its delivery pipeline
 # MIME-parses, encrypts to the recipient's key, and persists the row.
-virtual_mailbox_domains = {{ mail_domain }}
+virtual_mailbox_domains = {{ ([mail_domain] + (mail_extra_domains | default([])) + (mail_custom_domains | default([]))) | join(', ') }}
 virtual_transport = lmtp:127.0.0.1:24
 
 # Relay the originating client's IP (and name/helo) to euroton-server so

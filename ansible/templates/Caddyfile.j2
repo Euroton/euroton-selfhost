@@ -13,7 +13,7 @@
      proxy - plain reverse_proxy to backend_port (euroton-server APIs).
              https backend, tls_insecure_skip_verify because the leaf is
              our own.
-     godmode - Vite preview UI on backend_port, /admin/* to euroton-server,
+     godmode - built UI from `root`, /admin/* to euroton-server,
              whole site limited to operator_allowed. The only route to the
              admin API: every other site answers 404 for it, and the server
              binds loopback.
@@ -99,7 +99,9 @@ https://{{ site.hostname }}:443 {
             }
         }
         handle {
-            reverse_proxy http://127.0.0.1:{{ site.backend_port }}
+            root * {{ site.root | default(godmode_dir ~ '/dist') }}
+            try_files {path} /index.html
+            file_server
         }
 {% else %}
         @admin path /admin /admin/*

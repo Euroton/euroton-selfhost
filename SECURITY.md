@@ -10,7 +10,7 @@ Before the first release, a partial source-only audit produced 46 candidates: 42
 
 - The server itself still connects as the Postgres bootstrap superuser, so SQL injection in the server would reach shell commands in the database container. The SQL console doesn't: it connects as `euroton_console`, which has every table & no superuser rights.
 - Sign-up is open by default. `SIGNUP_ENABLED=false` closes it.
-- Postfix is off by default & has never moved a real message. A recipient can forge one false bounce notice for their own copy of a message.
+- Postfix is off by default & has only moved mail between test servers on one network. A recipient can forge one false bounce notice for their own copy of a message.
 
 ## What nobody has reviewed yet
 

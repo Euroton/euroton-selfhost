@@ -117,18 +117,28 @@
         path: "{{ server_dir }}"
       register: pf_server
 
-    - name: "preflight: check godmode_dir exists (only if godmode-dev is enabled)"
+    # An all.yml copied before 0.2.0 still lists godmode's Vite preview unit,
+    # which Caddy's dist/ replaces (the old unit gets removed further down).
+    # It also starts the server through , where corepack fetches pnpm
+    # from npm at service start, so a boot with no network crash-loops.
+    - name: "preflight: bring an older services list up to date"
+      ansible.builtin.set_fact:
+        services: >-
+          {{ services | rejectattr('name', 'equalto', 'godmode-dev') | list
+             | to_json | regex_replace('pnpm exec tsx', 'node_modules/.bin/tsx') | from_json }}
+
+    - name: "preflight: check godmode_dir exists (only if a godmode site is enabled)"
       ansible.builtin.stat:
         path: "{{ godmode_dir }}"
       register: pf_godmode
-      when: services | selectattr('name', 'equalto', 'godmode-dev') | list | length > 0
+      when: caddy_sites | selectattr('kind', 'equalto', 'godmode') | list | length > 0
 
     - name: "preflight: assert prerequisites"
       ansible.builtin.assert:
         that:
           - pf_mirror.stat.exists and pf_mirror.stat.isdir
           - pf_server.stat.exists and pf_server.stat.isdir
-          - (services | selectattr('name', 'equalto', 'godmode-dev') | list | length == 0) or
+          - (caddy_sites | selectattr('kind', 'equalto', 'godmode') | list | length == 0) or
             (pf_godmode.stat.exists and pf_godmode.stat.isdir)
         fail_msg: >-
           {{ mirror_dir }}, {{ server_dir }} and {{ godmode_dir }} must exist.
@@ -820,9 +830,9 @@
 
     # ─── godmode: deps + build (ADR 057) ───────────────────────────
     #
-    # Only runs if godmode-dev is in `services`. Same lockfile-hash
+    # Only runs if `caddy_sites` has a godmode site. Same lockfile-hash
     # trick as pnpm above to gate `changed`. The build step writes
-    # `dist/` which `vite preview` serves at runtime; gated on either
+    # `dist/` which Caddy serves as static files; gated on either
     # the lockfile moving (deps changed) OR a sha256 of the src/
     # tree drifting (operator pushed new godmode code).
 
@@ -955,6 +965,7 @@
           OPERATOR_TOKEN={{ operator_token }}
           OPERATOR_ORIGIN=https://godmode.{{ domain }}
           LOCAL_MAIL_DOMAIN={{ mail_domain if (postfix_enabled | default(false)) else domain }}
+          EXTRA_MAIL_DOMAINS={{ (mail_extra_domains | default([])) | join(',') }}
           ACCOUNT_APP_URL=https://account.{{ domain }}
           TRUST_PROXY=127.0.0.1
           CORS_ORIGINS=https://mail.{{ domain }},https://account.{{ domain }},https://calendar.{{ domain }},https://godmode.{{ domain }}
@@ -1160,7 +1171,6 @@
         recurse: true
       loop:
         - "{{ server_dir }}/data"
-        - "{{ godmode_dir }}/node_modules/.vite-temp"
 
     - name: "services: compute whether anything that affects services changed"
       ansible.builtin.set_fact:
@@ -1191,7 +1201,6 @@
              or twitter_site_replace.changed
              or yarn_install.changed or pnpm_install.changed
              or ssl_key_copied.changed or ssl_crt_copied.changed
-             or godmode_changed | default(false)
              or operator_env_changed | default(false) }}
 
     # ─── Production SPA builds (ADR 245) ────────────────────────────
@@ -1250,6 +1259,18 @@
         src: notify-when-ready
         dest: /usr/local/lib/euroton/notify-when-ready
         mode: "0755"
+
+    - name: "services: stop the old godmode-dev unit"
+      ansible.builtin.systemd:
+        name: godmode-dev
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: "services: remove the old godmode-dev unit"
+      ansible.builtin.file:
+        path: /etc/systemd/system/godmode-dev.service
+        state: absent
 
     - name: "services: install systemd unit"
       ansible.builtin.template:
@@ -1393,7 +1414,7 @@
     # contend for RAM. The per-port timeout is 600s.
     #
     # euroton-server already started before the smoke gates (above);
-    # this loop covers godmode. Order in the
+    # this loop covers anything else in `services`. Order in the
     # services list matters — earlier entries warm up first.
     - name: "services: serially restart + warm services (ADR 178)"
       ansible.builtin.include_tasks: tasks/restart-and-wait.yml

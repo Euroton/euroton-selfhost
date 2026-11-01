@@ -2,11 +2,13 @@
 
 Ansible playbooks that take a bare Debian 13 host to a running Euroton server: Node 22, Docker, Postgres, Caddy, the API, the admin UI & production builds of the Mail, Account & Calendar clients.
 
+For local mail without the client build, use the [Docker install](docker/README.md).
+
 [INSTALL.md](INSTALL.md) has every command, & [POST-INSTALL.md](POST-INSTALL.md) covers what comes after it. `ansible/README.md` covers what the playbooks do & how to run the server afterwards.
 
 ## Limits
 
-Local mail only. Accounts on one server can mail each other, with end-to-end encryption intact; the Postfix path for outside mail has only been syntax-checked (ADR 232 in `euroton-server`), so it's off by default.
+Accounts on one server mail each other with end-to-end encryption intact. Outside mail is off by default. With it on, mail moved in both directions between 2 test servers on one network, with attachments, DKIM, threading & bounces (ADR 256), but no server has moved mail across the internet yet. Mail to an outside address is readable by this server & the next one, like any email.
 
 TLS is self-signed unless you bring your own certificates. Your browser needs the generated CA installed; clicking through the warning breaks sign-up.
 

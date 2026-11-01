@@ -4,8 +4,7 @@
 #
 # ADR 181 added a `warmup_strategy` field per service:
 #   - simple  (default) — Type=simple + Restart=always. Used for
-#                         euroton-server (fast Fastify boot) and
-#                         godmode-dev (vite preview of pre-built dist).
+#                         euroton-server (fast Fastify boot).
 #   - notify  — Type=notify + a small wrapper that signals systemd
 #               READY=1 only after the underlying HTTP probe returns
 #               200/301/302. Used for webpack-dev-servers whose port

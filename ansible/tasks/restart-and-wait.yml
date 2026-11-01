@@ -35,8 +35,7 @@
 - name: "{{ item.0.name }}: wait for HTTP 200 on :{{ item.0.port | default('—') }} (ADR 182/183)"
   ansible.builtin.uri:
     # ADR 183: use the service's own `warmup_url` when defined (some
-    # backends are plain HTTP — godmode-dev's vite preview, for
-    # instance). Default to https on the bound port for webpack-dev-
+    # backends are plain HTTP). Default to https on the bound port for webpack-dev-
     # server units which terminate TLS with the per-instance leaf.
     url: "{{ item.0.warmup_url | default('https://127.0.0.1:' ~ item.0.port ~ '/index.html') }}"
     method: GET

@@ -12,8 +12,8 @@ repo_webclients: https://github.com/Euroton/WebClients.git
 repo_server: https://github.com/Euroton/euroton-server.git
 repo_godmode: https://github.com/Euroton/euroton-godmode.git
 version_webclients: euroton-0.1.0
-version_server: euroton-0.1.0
-version_godmode: euroton-0.1.0
+version_server: euroton-0.2.0
+version_godmode: euroton-0.2.0
 
 # Generated once on this machine under files/secrets/ (gitignored) & reused.
 db_password: "{{ lookup('ansible.builtin.password', playbook_dir ~ '/files/secrets/db_password', length=40, chars=['ascii_letters', 'digits']) }}"
@@ -94,11 +94,11 @@ caddy_sites:
   - hostname: account-api.{{ domain }}
     kind: proxy
     backend_port: 4000
-  # godmode (ADR 057): UI from Vite preview, /admin/* to euroton-server, and
-  # the whole site limited to operator_allowed.
+  # godmode (ADR 057): UI from the built dist/, /admin/* to euroton-server, and
+  # the whole site limited to operator_allowed. Drop this entry to disable it.
   - hostname: godmode.{{ domain }}
     kind: godmode
-    backend_port: 8090
+    root: "{{ godmode_dir }}/dist"
 
 # Per-app URL used in `favicon.config.js` for Open Graph / Twitter
 # card metadata, the favicon-webpack-plugin's manifest `start_url`,
@@ -216,23 +216,10 @@ services:
     env_file: /etc/euroton/server.env
     # No port wait — the playbook gates on /health instead.
     port: null
-  # ADR 245: the six webpack apps (mail/account/calendar/pass/
-  # vpn-settings/wallet) are no longer dev-servers. They are built to
+  # ADR 245: the webpack apps are no longer dev-servers. They are built to
   # static SPAs (see `build_apps`) and served by Caddy file_server (see
-  # `caddy_sites` kind: spa). Only euroton-server and the godmode vite
-  # preview run as systemd units. This frees the ~14 GB the dev-servers
-  # spent on HMR and removes the boot-time compile-herd.
-  # godmode operator UI (ADR 057). Vite preview serves the built dist/
-  # — light (no HMR), HTTP on 127.0.0.1:8090. Drop this entry to
-  # disable godmode without further changes.
-  - name: godmode-dev
-    cwd: "{{ godmode_dir }}"
-    cmd: "node_modules/.bin/vite preview --host 127.0.0.1 --port 8090 --strictPort"
-    log: /var/log/euroton/godmode-dev.log
-    port: 8090
-    # godmode-dev is plain HTTP (per caddy_sites backend_scheme: http);
-    # the default https probe URL would fail SSL handshake (ADR 183).
-    warmup_url: "http://127.0.0.1:8090/"
+  # `caddy_sites` kind: spa), like godmode's dist/. Only euroton-server runs
+  # as a systemd unit.
 
 # ADR 245: webpack apps built once to static SPAs, served by Caddy
 # file_server. `workspace` is the yarn workspace; `dist` is the build
@@ -264,6 +251,12 @@ postfix_enabled: false
 # per docs/external-mail-setup.md before flipping the held queue.
 mail_domain: "example.org"
 mail_hostname: "mail.example.org"
+# More domains anyone can sign up under. Each needs an MX record pointing here,
+# plus SPF, DKIM & DMARC like mail_domain.
+mail_extra_domains: []
+# Domains one account added in its settings. Postfix refuses mail for a domain
+# it doesn't know, so list them here & re-run the playbook.
+mail_custom_domains: []
 
 # Held-queue release switch. Leave 'none' until DNS records are live
 # and verified (outbound is recorded as 'skipped', nothing leaves the

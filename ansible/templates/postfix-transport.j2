@@ -8,4 +8,6 @@
 # pipe service (master.cf), which extracts the id and POSTs the DSN to
 # euroton-server's ingest endpoint. recipient_delimiter='+' means this
 # entry matches bounces+<anything>@<domain>.
-bounces@{{ mail_domain }}    euroton-bounce:
+{% for d in [mail_domain] + (mail_extra_domains | default([])) + (mail_custom_domains | default([])) %}
+bounces@{{ d }}    euroton-bounce:
+{% endfor %}

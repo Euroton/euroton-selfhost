@@ -2,13 +2,15 @@
 
 ## Status: alpha
 
-This is the first version. The server's suite passes 1,464 checks & a clean install has been rehearsed on Debian 13, but no server has moved mail to or from the internet yet, & no database has been carried across a real version upgrade. Keep backups, & don't make this your only copy of mail you can't lose.
+This is an early version. The server's suite passes 1,492 checks. A clean install has been rehearsed on Debian 13, a 0.1.0 install with real accounts upgraded to 0.2.0, & a backup restored with every message & attachment accounted for. Mail moved both ways between 2 test servers on one network, but no server has moved mail across the internet yet. Keep backups, & don't make this your only copy of mail you can't lose.
 
-These have to happen before it's called beta: a week of live mail through Postfix in both directions, an upgrade tested with real data, a tested restore from backup, services that don't run as root & the rest of the audit in [SECURITY.md](SECURITY.md). Godmode also still runs on a Vite dev server.
+These have to happen before it's called beta: a week of live mail through Postfix with real providers in both directions, & the rest of the audit in [SECURITY.md](SECURITY.md).
 
-Sections marked **untested** have never handled real mail or a real certificate. The Postfix tasks install & start on Debian 13, & that's as far as testing went. Report what breaks.
+The section marked **untested** has never handled a real certificate. Report what breaks.
 
-## Outside mail (untested)
+## Outside mail
+
+Tested between 2 servers on one network with local DNS. Sending reputation, real providers & relay hosts haven't been tested.
 
 Both options below need a domain you control, DNS records & `postfix_enabled: true`. Set this before accounts exist, because addresses keep the suffix they got at sign-up:
 
@@ -49,11 +51,17 @@ certbot certonly --standalone \
 
 Caddy listens on 443 only, so port 80 is free for certbot, & Debian's certbot package renews on a timer. Then set `ssl_external: true` in `group_vars/all.yml`, or the next playbook run puts the self-signed certificate back. The certificate is logged publicly, so the name `godmode.example.org` will be visible; Caddy still answers 403 to addresses outside `operator_allowed`.
 
-## More system domains: not built
+## More system domains
 
-The server has one system domain, `LOCAL_MAIL_DOMAIN`, set from `domain` or `mail_domain`. `/core/v4/domains/available` returns that one plus the account's own verified custom domains, & the address routes reject any other suffix, so a second sign-up domain such as a short alias needs a code change. It can only ever work for domains you own, because mail for `pm.me` or `protonmail.ch` is routed by DNS those names' owner controls.
+List extra sign-up domains in `group_vars/all.yml`, each with its own MX, SPF, DKIM & DMARC records pointing at this host:
 
-Custom domains per account do work, added in the account's settings. `REQUIRE_DOMAIN_DNS_VERIFY=true` makes them prove ownership with a TXT record; it's off by default, so turn it on if other people use your server.
+```yaml
+mail_extra_domains: ["short.example"]
+```
+
+This works only for domains you own, because mail for `pm.me` or `protonmail.ch` is routed by DNS those names' owner controls. A username is unique across the whole server, whichever domain it signed up under.
+
+Custom domains per account are added in the account's settings. With Postfix on, also add each one to `mail_custom_domains` & re-run the playbook, or Postfix refuses its mail. `REQUIRE_DOMAIN_DNS_VERIFY=true` makes them prove ownership with a TXT record; it's off by default, so turn it on if other people use your server.
 
 ## Give an account a plan
 
@@ -75,23 +83,9 @@ Run `playbook.yml` after any change. A full rename hasn't been run end to end, s
 
 There's no release channel yet; watch the [euroton-server](https://github.com/Euroton/euroton-server) tags. [Back up](https://github.com/Euroton/euroton-server/blob/main/docs/OPERATOR.md#backup) first, because migrations run at boot & don't reverse.
 
-1. Change the `version_*` tags in `group_vars/all.yml`.
-2. On the host, in each source tree under `/opt/euroton`, run `git fetch --tags --force && git checkout -f <tag>`.
-3. Run `playbook.yml`.
+1. On the control machine, run `git pull` in your copy of this repo.
+2. Change the `version_*` tags in `group_vars/all.yml` to match `group_vars/all.example.yml`. Leave the rest of your file alone.
+3. On the host, in each source tree under `/opt/euroton`, run `git fetch --tags --force && git checkout -f <tag>`.
+4. Run `playbook.yml`.
 
-The playbook restarts `euroton-server` when its git revision changes. It also rewrites `/etc/euroton/server.env`, so anything added by hand, such as `SIGNUP_ENABLED=false`, has to be added again. Client code changes mean a rebuild, about as long as the install.
-
-## Docker: Postgres only
-
-Only Postgres runs in Docker. The server, Godmode & Caddy are systemd units on Debian 13, & the clients are patched & built on the host, so there's no image to pull & no compose file for the whole stack. Debian 13 in a VM or an LXC container is what has been tested.
-
-## Mobile apps: coming soon
-
-There are no Euroton mobile apps yet. Versions that can point at a self-hosted server are coming, with no date & no promises. Proton's own apps talk to Proton's servers. The web apps haven't been tested on phones. `euroton-imap-bridge` is a skeleton that doesn't serve mail, so desktop mail clients can't connect either.
-
-## Other things worth knowing
-
-- **Backups:** Postgres, blobs & the data directory all have to come back together. [OPERATOR.md](https://github.com/Euroton/euroton-server/blob/main/docs/OPERATOR.md#backup) has the commands & a restore test.
-- **Sign-up:** open until you set `SIGNUP_ENABLED=false`.
-- **Calendar:** public links, subscriptions, holiday calendars & video conferencing return an error, because they have no backend here.
-- **Drive, Pass, VPN & Wallet:** not supported in this version.
+A 0.1.0 install with accounts & mail upgraded to 0.2.0 this way, with its `all.yml` unchanged except for those tags. The playbook removes the old `godmode-dev` unit & stops the server depending on npm at boot.

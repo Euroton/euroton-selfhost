@@ -12,7 +12,7 @@ Two playbooks. `provision.yml` turns bare Debian 13 into a host with Node, Docke
 2. Generates a CA & leaf certificate on your control machine in `files/ssl/`, and copies the leaf & the CA certificate to `/etc/euroton/ssl/`. The CA private key stays on your machine.
 3. Installs dependencies, then generates the install's SRP modulus keypair & writes the public half into `node_modules/@protontech/crypto/src/srp/constants.ts`. The upstream client only accepts modulus signatures from the key it was built with, so this has to happen before the build (ADR 004).
 4. Applies the Euroton palette, logos & locale names, then builds Mail, Account & Calendar as static files.
-5. Writes `/etc/euroton/server.env` & the systemd units, starts `euroton-server` & `godmode-dev`, writes the Caddyfile, and checks every hostname answers.
+5. Writes `/etc/euroton/server.env` & the systemd units, starts `euroton-server`, writes the Caddyfile, and checks every hostname answers.
 
 Re-running is safe. Secrets in `files/secrets/` & the SRP keypair stay as they are, and a client rebuilds only when its inputs changed.
 
@@ -36,8 +36,7 @@ The API hostnames need trusting too. If you click through warnings instead of in
 
 ```sh
 journalctl -fu euroton-server
-journalctl -fu godmode-dev
-systemctl status caddy euroton-server godmode-dev
+systemctl status caddy euroton-server
 systemctl restart euroton-server
 ```
 
@@ -55,7 +54,7 @@ To rotate the token, delete `files/secrets/operator_token` & re-run the playbook
 
 ## Outside mail
 
-Off by default & untested. `postfix_enabled: true` installs Postfix, spamd & postgrey, which installed & started on Debian 13 in a rehearsal, but no real message has gone through it. It needs a public IP, inbound port 25, real DNS & a `domain` other than `.internal`, because remote servers reject that suffix. `euroton-server/docs/external-mail-setup.md` lists the DNS records.
+Off by default. `postfix_enabled: true` installs Postfix, spamd & postgrey. Mail moved in both directions between 2 test servers on one network, with attachments, dkim, threading & bounces (adr 256), but no server has moved mail across the internet yet. It needs a public IP, inbound port 25, real DNS & a `domain` other than `.internal`, because remote servers reject that suffix. `euroton-server/docs/external-mail-setup.md` lists the DNS records.
 
 [POST-INSTALL.md](../POST-INSTALL.md) has the steps, including a relay provider. `mail_outbound_backend` stays `none` until inbound is verified. Setting it to `postfix` releases the queue.
 

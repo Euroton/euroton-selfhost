@@ -81,11 +81,11 @@ That token reads & changes every table, including password verifiers & sessions,
 A reboot brings everything back. Check with:
 
 ```sh
-systemctl is-active caddy euroton-server godmode-dev
+systemctl is-active caddy euroton-server
 ```
 
 Before this host faces the internet, set `SIGNUP_ENABLED=false` in `/etc/euroton/server.env` & restart `euroton-server`. With it off, only organization invites can create accounts. A re-run of `playbook.yml` rewrites that file, so make the change again afterwards.
 
-[ansible/README.md](ansible/README.md) covers logs, upgrades & token rotation. Outside mail is off & has never moved a real message, so this install moves mail between accounts on the same server only.
+[ansible/README.md](ansible/README.md) covers logs, upgrades & token rotation. Outside mail is off, so this install moves mail between accounts on the same server only; [POST-INSTALL.md](POST-INSTALL.md) covers turning it on.
 
 The audit that ran before release was partial, and its open items are listed in `SECURITY.md`.

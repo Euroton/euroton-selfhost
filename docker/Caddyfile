@@ -1,0 +1,237 @@
+{
+    auto_https disable_redirects
+    admin off
+}
+
+https://mail.{$EUROTON_DOMAIN}:443 {
+    tls {$EUROTON_TLS:internal}
+    header Strict-Transport-Security "max-age=31536000"
+        route {
+        encode gzip
+
+        @admin path /api/admin /api/admin/* /internal-api/admin /internal-api/admin/*
+        handle @admin {
+            respond 404
+        }
+
+        # Same-origin API proxy to euroton-server (replicates the dev-server proxy).
+        # handle_path strips the matched prefix before forwarding, so
+        # /api/core/v4/auth -> /core/v4/auth on euroton-server.
+        handle_path /api/* {
+        request_body {
+            max_size 64MB
+        }
+        reverse_proxy http://server:4000 {
+            header_down -Content-Security-Policy
+            header_down -Content-Security-Policy-Report-Only
+            header_down -X-Frame-Options
+                        header_down Set-Cookie "; *[Dd]omain=[^;]*" ""
+        }
+
+        }
+        handle_path /internal-api/* {
+        request_body {
+            max_size 64MB
+        }
+        reverse_proxy http://server:4000 {
+            header_down -Content-Security-Policy
+            header_down -Content-Security-Policy-Report-Only
+            header_down -X-Frame-Options
+                        header_down Set-Cookie "; *[Dd]omain=[^;]*" ""
+        }
+
+        }
+
+        # Content-addressed assets (hashed filenames) are served directly; a
+        # miss returns a real 404 instead of falling through to index.html.
+        # Mirrors the app src/.htaccess `RewriteRule ^assets/ - [L]` (ADR 245
+        # addendum) so a renamed/missing chunk fails loudly rather than being
+        # served index.html as text/html — which the JS/worker loader would then
+        # execute as a script and crash the feature that needed it.
+        handle /assets/* {
+            root * /srv/web/mail
+            file_server
+        }
+
+        # SPA navigation routes fall back to index.html.
+        handle {
+            root * /srv/web/mail
+            @rw1 path /eo /eo/*
+            rewrite @rw1 /eo.html
+            @rw2 path /oauth/callback
+            rewrite @rw2 /oauth.html
+            try_files {path} /index.html
+            file_server
+        }
+    }
+}
+
+https://account.{$EUROTON_DOMAIN}:443 {
+    tls {$EUROTON_TLS:internal}
+    header Strict-Transport-Security "max-age=31536000"
+        route {
+        encode gzip
+
+        @admin path /api/admin /api/admin/* /internal-api/admin /internal-api/admin/*
+        handle @admin {
+            respond 404
+        }
+
+        # Same-origin API proxy to euroton-server (replicates the dev-server proxy).
+        # handle_path strips the matched prefix before forwarding, so
+        # /api/core/v4/auth -> /core/v4/auth on euroton-server.
+        handle_path /api/* {
+        request_body {
+            max_size 64MB
+        }
+        reverse_proxy http://server:4000 {
+            header_down -Content-Security-Policy
+            header_down -Content-Security-Policy-Report-Only
+            header_down -X-Frame-Options
+                        header_down Set-Cookie "; *[Dd]omain=[^;]*" ""
+        }
+
+        }
+        handle_path /internal-api/* {
+        request_body {
+            max_size 64MB
+        }
+        reverse_proxy http://server:4000 {
+            header_down -Content-Security-Policy
+            header_down -Content-Security-Policy-Report-Only
+            header_down -X-Frame-Options
+                        header_down Set-Cookie "; *[Dd]omain=[^;]*" ""
+        }
+
+        }
+
+        # Content-addressed assets (hashed filenames) are served directly; a
+        # miss returns a real 404 instead of falling through to index.html.
+        # Mirrors the app src/.htaccess `RewriteRule ^assets/ - [L]` (ADR 245
+        # addendum) so a renamed/missing chunk fails loudly rather than being
+        # served index.html as text/html — which the JS/worker loader would then
+        # execute as a script and crash the feature that needed it.
+        handle /assets/* {
+            root * /srv/web/account
+            file_server
+        }
+
+        # SPA navigation routes fall back to index.html.
+        handle {
+            root * /srv/web/account
+            @rw1 path /u /u/*
+            rewrite @rw1 /private.html
+            @rw2 path /lite /lite/*
+            rewrite @rw2 /lite/index.html
+            @rw3 path /oauth/callback
+            rewrite @rw3 /oauth.html
+            try_files {path} /index.html
+            file_server
+        }
+    }
+}
+
+https://calendar.{$EUROTON_DOMAIN}:443 {
+    tls {$EUROTON_TLS:internal}
+    header Strict-Transport-Security "max-age=31536000"
+        route {
+        encode gzip
+
+        @admin path /api/admin /api/admin/* /internal-api/admin /internal-api/admin/*
+        handle @admin {
+            respond 404
+        }
+
+        # Same-origin API proxy to euroton-server (replicates the dev-server proxy).
+        # handle_path strips the matched prefix before forwarding, so
+        # /api/core/v4/auth -> /core/v4/auth on euroton-server.
+        handle_path /api/* {
+        request_body {
+            max_size 64MB
+        }
+        reverse_proxy http://server:4000 {
+            header_down -Content-Security-Policy
+            header_down -Content-Security-Policy-Report-Only
+            header_down -X-Frame-Options
+                        header_down Set-Cookie "; *[Dd]omain=[^;]*" ""
+        }
+
+        }
+        handle_path /internal-api/* {
+        request_body {
+            max_size 64MB
+        }
+        reverse_proxy http://server:4000 {
+            header_down -Content-Security-Policy
+            header_down -Content-Security-Policy-Report-Only
+            header_down -X-Frame-Options
+                        header_down Set-Cookie "; *[Dd]omain=[^;]*" ""
+        }
+
+        }
+
+        # Content-addressed assets (hashed filenames) are served directly; a
+        # miss returns a real 404 instead of falling through to index.html.
+        # Mirrors the app src/.htaccess `RewriteRule ^assets/ - [L]` (ADR 245
+        # addendum) so a renamed/missing chunk fails loudly rather than being
+        # served index.html as text/html — which the JS/worker loader would then
+        # execute as a script and crash the feature that needed it.
+        handle /assets/* {
+            root * /srv/web/calendar
+            file_server
+        }
+
+        # SPA navigation routes fall back to index.html.
+        handle {
+            root * /srv/web/calendar
+            try_files {path} /index.html
+            file_server
+        }
+    }
+}
+
+https://mail-api.{$EUROTON_DOMAIN}:443 {
+    tls {$EUROTON_TLS:internal}
+    header Strict-Transport-Security "max-age=31536000"
+        route {
+        @admin path /admin /admin/*
+        handle @admin {
+            respond 404
+        }
+        handle {
+            reverse_proxy http://server:4000
+        }
+    }
+}
+
+https://account-api.{$EUROTON_DOMAIN}:443 {
+    tls {$EUROTON_TLS:internal}
+    header Strict-Transport-Security "max-age=31536000"
+        route {
+        @admin path /admin /admin/*
+        handle @admin {
+            respond 404
+        }
+        handle {
+            reverse_proxy http://server:4000
+        }
+    }
+}
+
+# Published on loopback only (compose.yml), since behind Docker's networking a
+# client's address can't be trusted for a private-range check.
+https://godmode.{$EUROTON_DOMAIN}:8443 {
+    tls {$EUROTON_TLS:internal}
+    header Strict-Transport-Security "max-age=31536000"
+        route {
+        handle /admin/* {
+            reverse_proxy http://server:4000
+        }
+        handle {
+            root * /srv/web/godmode
+            try_files {path} /index.html
+            file_server
+        }
+    }
+}
+
